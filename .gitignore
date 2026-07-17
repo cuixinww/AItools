@@ -1,0 +1,13 @@
+target/
+*.class
+*.log
+*.docx
+*.doc
+*.xlsx
+*.xls
+*.pdf
+*.zip
+extracted_output/
+.idea/
+*.iml
+.vscode/
