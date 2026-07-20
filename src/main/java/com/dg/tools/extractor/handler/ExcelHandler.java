@@ -1,18 +1,34 @@
 package com.dg.tools.extractor.handler;
 
+import com.dg.tools.extractor.excel.MergeCellResolver;
+import com.dg.tools.extractor.excel.RegionSplitter;
+import com.dg.tools.extractor.excel.RegionSplitter.Region;
 import com.dg.tools.extractor.model.*;
 import org.apache.poi.ss.usermodel.*;
 import org.apache.poi.ss.usermodel.Workbook;
 
 import java.io.InputStream;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.StringJoiner;
 
+/**
+ * Excel 处理器（ExcelHandler）。
+ *
+ * 基于 Apache POI 解析 .xlsx / .xls 表格文件，特点：
+ *   - 合并单元格填充：借助 {@link MergeCellResolver} 把合并区域的值向四周铺满；
+ *   - 多区域切分：借助 {@link RegionSplitter} 按「连续空列」把宽表切成若干独立区域；
+ *   - 大小表分流：小表（≤50 行且 ≤10 列）直接渲染为 Markdown；
+ *                  大表（超出阈值）仅写 data_ref 引用 + 完整 CSV 到 data/，避免正文膨胀；
+ *   - CSV 切片：大表行数 >500 时由 {@link com.dg.tools.extractor.excel.CsvSlicer} 切分为 100 行/块。
+ */
 public class ExcelHandler implements DocumentHandler {
 
+    /** 判定「小表」的行列阈值：行数上限。超过则视为大表走 data_ref。 */
     private static final int LARGE_TABLE_THRESHOLD = 50;
 
+    /**
+     * 是否支持该文件：匹配 .xlsx 与 .xls。
+     */
     @Override
     public boolean supports(String fileName) {
         if (fileName == null) return false;
@@ -20,12 +36,43 @@ public class ExcelHandler implements DocumentHandler {
         return lower.endsWith(".xlsx") || lower.endsWith(".xls");
     }
 
+    /**
+     * 阶段 1 拆包：仅抽取工作簿内全部图片（不含单元格文本）。
+     */
+    @Override
+    public UnpackResult unpack(InputStream is, String fileName) {
+        if (is == null) {
+            throw new IllegalArgumentException("InputStream must not be null");
+        }
+        String fileType = detectFileType(fileName);
+        UnpackResult unpacked = new UnpackResult(fileType, fileName);
+        int pos = 0;
+
+        try (Workbook wb = WorkbookFactory.create(is)) {
+            List<? extends PictureData> pictures = wb.getAllPictures();
+            for (PictureData pic : pictures) {
+                String format = detectImageFormat(pic.getMimeType());
+                String imgName = "excel_image_" + pos + "." + format;
+                unpacked.addImage(new ImageFile(imgName, pos, pic.getData(), format));
+                pos++;
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to unpack excel: " + fileName, e);
+        }
+
+        return unpacked;
+    }
+
+    /**
+     * 阶段 2 解析：逐 Sheet 处理，先填充合并单元格，再按区域切分分别输出。
+     */
     @Override
     public ExtractionResult extract(InputStream is, String fileName) {
         if (is == null) {
             throw new IllegalArgumentException("InputStream must not be null");
         }
-        ExtractionResult result = new ExtractionResult("xlsx", fileName);
+        String fileType = detectFileType(fileName);
+        ExtractionResult result = new ExtractionResult(fileType, fileName);
         int position = 0;
 
         try (Workbook wb = WorkbookFactory.create(is)) {
@@ -33,68 +80,73 @@ public class ExcelHandler implements DocumentHandler {
                 Sheet sheet = wb.getSheetAt(s);
                 String sheetName = sheet.getSheetName();
 
-                result.addElement(new Element(position++, "sheet_header", "[Sheet: " + sheetName + "]"));
-
-                List<List<String>> allRows = new ArrayList<>();
-                for (Row row : sheet) {
-                    List<String> rowData = new ArrayList<>();
-                    for (int c = 0; c < row.getLastCellNum(); c++) {
-                        rowData.add(getCellValue(row.getCell(c)));
-                    }
-                    allRows.add(rowData);
-                }
-
+                // 合并单元格填充，得到矩形化的行数据
+                List<List<String>> allRows = MergeCellResolver.readRows(sheet);
                 if (allRows.isEmpty()) continue;
 
-                if (allRows.size() <= LARGE_TABLE_THRESHOLD && !allRows.get(0).isEmpty()
-                        && allRows.get(0).size() <= 10) {
-                    StringBuilder md = new StringBuilder();
-                    for (int r = 0; r < allRows.size(); r++) {
-                        md.append("| ").append(String.join(" | ", allRows.get(r))).append(" |\n");
-                        if (r == 0) {
-                            md.append("| ").append(allRows.get(r).stream()
-                                    .map(c -> "---")
-                                    .collect(java.util.stream.Collectors.joining(" | "))).append(" |\n");
-                        }
-                    }
-                    result.addElement(new Element(position++, "table", md.toString().trim()));
-                } else {
-                    int headerIdx = findHeaderRowIndex(allRows);
-                    List<String> headerRow = allRows.get(headerIdx);
+                // 按列填充率把宽表切成多个独立区域
+                List<Region> regions = RegionSplitter.split(allRows);
+                for (int ri = 0; ri < regions.size(); ri++) {
+                    Region region = regions.get(ri);
+                    List<List<String>> regionRows = region.rows;
+                    if (regionRows.isEmpty()) continue;
 
-                    // Clean schema: only non-empty cells
-                    StringJoiner schema = new StringJoiner(" | ");
-                    for (String cell : headerRow) {
-                        if (cell != null && !cell.trim().isEmpty()) {
-                            schema.add(cell.trim());
-                        }
-                    }
+                    // 区域标题（多区域时附带区域编号，便于区分）
+                    String label = regions.size() > 1
+                            ? "[Sheet: " + sheetName + " / Region " + (ri + 1) + "]"
+                            : "[Sheet: " + sheetName + "]";
+                    result.addElement(new Element(position++, "sheet_header", label));
 
-                    // Preview: header row + first 2 data rows as clean key-value
-                    StringBuilder preview = new StringBuilder();
-                    preview.append("Columns: ").append(schema).append("\n");
-                    int dataStart = headerIdx + 1;
-                    int previewEnd = Math.min(dataStart + 2, allRows.size());
-                    for (int r = dataStart; r < previewEnd; r++) {
-                        preview.append("Row ").append(r - dataStart + 1).append(": ");
-                        StringJoiner rowStr = new StringJoiner(", ");
-                        for (String cell : allRows.get(r)) {
-                            if (cell != null && !cell.trim().isEmpty()) {
-                                rowStr.add(cell.trim());
+                    // 智能定位表头行（首个非空单元格数 ≥2 的行）
+                    int headerIdx = findHeaderRowIndex(regionRows);
+                    List<String> headerRow = regionRows.get(headerIdx);
+                    List<List<String>> tableRows = regionRows.subList(headerIdx, regionRows.size());
+
+                    if (tableRows.size() <= LARGE_TABLE_THRESHOLD && headerRow.size() <= 10) {
+                        // 小表 —— 全量渲染为 Markdown 表格
+                        StringBuilder md = new StringBuilder();
+                        for (int r = 0; r < tableRows.size(); r++) {
+                            md.append("| ").append(String.join(" | ", tableRows.get(r))).append(" |\n");
+                            if (r == 0) {
+                                md.append("| ").append(tableRows.get(r).stream()
+                                        .map(c -> "---")
+                                        .collect(java.util.stream.Collectors.joining(" | "))).append(" |\n");
                             }
                         }
-                        preview.append(rowStr).append("\n");
-                    }
+                        result.addElement(new Element(position++, "table", md.toString().trim()));
+                    } else {
+                        // 大表 —— 以 data_ref 形式引用（保留空列名避免列错位）
+                        StringJoiner schema = new StringJoiner(" | ");
+                        for (String cell : headerRow) {
+                            schema.add(cell != null ? cell.trim() : "");
+                        }
 
-                    LargeTableInfo lti = new LargeTableInfo(
-                            sheetName, position++, schema.toString(),
-                            preview.toString().trim(), allRows.size(), allRows
-                    );
-                    result.addLargeTable(lti);
+                        // 构造预览：列名 + 前 2 行数据
+                        StringBuilder preview = new StringBuilder();
+                        preview.append("Columns: ").append(schema).append("\n");
+                        int previewEnd = Math.min(1 + 2, tableRows.size());
+                        for (int r = 1; r < previewEnd; r++) {
+                            preview.append("Row ").append(r).append(": ");
+                            StringJoiner rowStr = new StringJoiner(", ");
+                            for (String cell : tableRows.get(r)) {
+                                if (cell != null && !cell.trim().isEmpty()) {
+                                    rowStr.add(cell.trim());
+                                }
+                            }
+                            preview.append(rowStr).append("\n");
+                        }
+
+                        // 记录大表信息（含全部行，供 StoreWriter 写完整 CSV）
+                        LargeTableInfo lti = new LargeTableInfo(
+                                sheetName, position++, schema.toString(),
+                                preview.toString().trim(), tableRows.size(), tableRows
+                        );
+                        result.addLargeTable(lti);
+                    }
                 }
             }
 
-            // Extract images
+            // 抽取工作簿级图片
             extractImages(wb, result, position);
 
         } catch (Exception e) {
@@ -104,27 +156,26 @@ public class ExcelHandler implements DocumentHandler {
         return result;
     }
 
+    /** 抽取工作簿内图片，位置序号从当前 position 之后累计。 */
     private void extractImages(Workbook wb, ExtractionResult result, int startPosition) {
         try {
             List<? extends PictureData> pictures = wb.getAllPictures();
             int pos = startPosition;
             for (PictureData pic : pictures) {
-                String format = switch (pic.getMimeType()) {
-                    case "image/png" -> "png";
-                    case "image/jpeg" -> "jpg";
-                    case "image/gif" -> "gif";
-                    case "image/bmp" -> "bmp";
-                    default -> "png";
-                };
+                String format = detectImageFormat(pic.getMimeType());
                 String imgName = "excel_image_" + pos + "." + format;
                 result.addImage(new ImageFile(imgName, pos, pic.getData(), format));
                 pos++;
             }
         } catch (Exception e) {
-            // silently skip
+            result.addError("images: " + e.getMessage());
         }
     }
 
+    /**
+     * 智能定位表头行：返回第一个「非空单元格数 ≥ 2」的行索引；
+     * 若没有任何行满足，则回退为第 0 行。
+     */
     private int findHeaderRowIndex(List<List<String>> allRows) {
         for (int i = 0; i < allRows.size(); i++) {
             long nonEmpty = allRows.get(i).stream()
@@ -135,24 +186,31 @@ public class ExcelHandler implements DocumentHandler {
         return 0;
     }
 
-    private String getCellValue(Cell cell) {
-        if (cell == null) return "";
-        return switch (cell.getCellType()) {
-            case STRING -> cell.getStringCellValue();
-            case NUMERIC -> {
-                double v = cell.getNumericCellValue();
-                if (v == Math.floor(v) && !Double.isInfinite(v)) yield String.valueOf((long) v);
-                yield String.valueOf(v);
+    // ==================== 工具方法 ====================
+
+    /** 根据文件名判定文件类型（.xls → "xls"，其余 → "xlsx"）。 */
+    private static String detectFileType(String fileName) {
+        if (fileName != null && fileName.toLowerCase().endsWith(".xls")) return "xls";
+        return "xlsx";
+    }
+
+    /** 根据 MIME 类型映射图片扩展名；无法识别时尝试从子类型提取或回退 "bin"。 */
+    private static String detectImageFormat(String mimeType) {
+        if (mimeType == null) return "bin";
+        return switch (mimeType) {
+            case "image/png" -> "png";
+            case "image/jpeg" -> "jpg";
+            case "image/gif" -> "gif";
+            case "image/bmp", "image/x-bmp" -> "bmp";
+            case "image/tiff", "image/x-tiff" -> "tiff";
+            case "image/x-emf" -> "emf";
+            case "image/x-wmf" -> "wmf";
+            case "image/svg+xml" -> "svg";
+            default -> {
+                // 尝试从 MIME 子类型提取扩展名（如 "image/webp" → "webp"）
+                int slash = mimeType.indexOf('/');
+                yield slash > 0 ? mimeType.substring(slash + 1) : "bin";
             }
-            case BOOLEAN -> String.valueOf(cell.getBooleanCellValue());
-            case FORMULA -> {
-                try { yield String.valueOf(cell.getNumericCellValue()); }
-                catch (Exception e) {
-                    try { yield cell.getStringCellValue(); }
-                    catch (Exception e2) { yield cell.getCellFormula(); }
-                }
-            }
-            default -> "";
         };
     }
 }

@@ -220,12 +220,18 @@ public class TestFileFactory {
 
     static byte[] wrapAsOle10Native(String fileName, byte[] content) throws IOException {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        // Write fileName as null-terminated ASCII
-        baos.write(fileName.getBytes(StandardCharsets.US_ASCII));
+        // Ole10Native format: 4-byte native size + filename (\0-terminated ASCII) + content
+        byte[] nameBytes = fileName.getBytes(StandardCharsets.US_ASCII);
+        int nativeSize = nameBytes.length + 1 + content.length;
+        baos.write(intToLeBytes(nativeSize));
+        baos.write(nameBytes);
         baos.write(0);
-        // Write content
         baos.write(content);
         return baos.toByteArray();
+    }
+
+    private static byte[] intToLeBytes(int v) {
+        return new byte[]{(byte) v, (byte) (v >> 8), (byte) (v >> 16), (byte) (v >> 24)};
     }
 
     // ========== Minimal .doc (OLE2-based Word 97-2003) ==========
@@ -241,8 +247,11 @@ public class TestFileFactory {
             byte[] wordDoc = createMinimalWordDocument();
             root.createDocument("WordDocument", new ByteArrayInputStream(wordDoc));
 
-            // Empty table streams — required by HWPF
-            root.createDocument("1Table", new ByteArrayInputStream(new byte[0]));
+            // Table streams with minimal Clx (complex format) data.
+            // HWPF reads PlcFld, PlcPcd and other structures from these streams;
+            // they must be non-empty to avoid ArrayIndexOutOfBoundsException.
+            byte[] tableStream = createMinimalTableStream();
+            root.createDocument("1Table", new ByteArrayInputStream(tableStream));
             root.createDocument("0Table", new ByteArrayInputStream(new byte[0]));
 
             // CompObj is optional but good practice
@@ -255,36 +264,46 @@ public class TestFileFactory {
     }
 
     private static byte[] createMinimalWordDocument() throws IOException {
-        // Fib base + ccpText — minimal FIB to make HWPF not crash
-        // This is the binary File Information Block header for Word 97
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        // Minimal Word Binary File format (FIB) that HWPF can parse.
+        // The FIB header (0x0020 bytes) is followed by FibRgFcLcb97 and FibRgLw97.
+        // csw at offset 0x0020 controls FibRgFcLcb97 size: each field is 8 bytes (fc+lcb).
+        // It must be large enough so FIBFieldHandler's internal array holds field index 62.
+        int fibSize = 0x400;
+        byte[] fib = new byte[fibSize];
 
         // wIdent (magic: 0xA5EC)
-        baos.write(new byte[]{(byte) 0xEC, (byte) 0xA5});
+        fib[0] = (byte) 0xEC;
+        fib[1] = (byte) 0xA5;
 
-        // nFib (version) — use 0x00C1 (Word 97)
-        baos.write(new byte[]{(byte) 0xC1, 0x00});
+        // nFib = 0x006D (109) — accepted by HWPFDocument, includes FibRgFcLcb97 but not FibRgLw97
+        fib[2] = 0x6D;
+        fib[3] = 0x00;
 
-        // Simplified: write enough bytes for HWPF to parse without crashing
-        // flags / lid / etc. — pad with zeros
-        // We need at least fibRgLw (header) + some ccpText
-        // ccpText at offset 0x004C
+        // fWhichTblStm = 1 (use 1Table / 0Table)
+        fib[0x0A] = 1;
 
-        byte[] header = new byte[0x0050];
-        header[0] = (byte) 0xEC; // wIdent low
-        header[1] = (byte) 0xA5; // wIdent high
-        header[2] = (byte) 0xC1; // nFib low
-        header[3] = 0x00;        // nFib high
+        // csw at offset 0x0020: count of shorts in FibRgFcLcb97.
+        // Need >= 63 fields → >= 504 bytes → csw >= 252 (0xFC). Use 0x0160 (352) for safety.
+        fib[0x20] = 0x60;
+        fib[0x21] = 0x01;
 
         // ccpText at offset 0x004C — 1 character
-        header[0x4C] = 1;
+        fib[0x4C] = 1;
 
-        baos.write(header);
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        baos.write(fib);
 
-        // Character text — "X" — 2 bytes per char in Unicode
+        // Character text — "X" in Unicode (2 bytes)
         baos.write(new byte[]{'X', 0x00});
 
         return baos.toByteArray();
+    }
+
+    /** Minimal table stream with enough bytes to satisfy HWPF's FIB field handler reads. */
+    private static byte[] createMinimalTableStream() {
+        // Provide 4096 bytes of zeros — large enough for any fc/lcb pair in a zeroed FIB
+        // to read without ArrayIndexOutOfBoundsException.
+        return new byte[4096];
     }
 
     private static byte[] createCompObj() throws IOException {
