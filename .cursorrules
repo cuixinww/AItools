@@ -1,0 +1,109 @@
+﻿# .cursorrules — Cursor IDE AI 编程规则
+
+> 本文件供 Cursor ( Claude ) IDE 读取，控制 AI 的代码生成行为。
+> 详细项目规范和通用编码约定请参见根目录 AGENTS.md。
+
+---
+
+## 项目上下文
+- **语言/版本**: Java 17
+- **框架**: Spring Boot 3.3.5
+- **构建**: Maven
+- **测试**: JUnit 5 + AssertJ + Jacoco
+- **核心包**: com.dg.tools.extractor
+
+## 编码风格指令
+
+### 代码生成规则
+1. **不写冗余 import**：只在需要时添加 import，不批量导入全部相关类。
+2. **方法长度限制**：任何方法不超过 80 行；超过时拆分为私有辅助方法。
+3. **空检查优先**：null 检查和异常处理放在方法开头（Guard Clause 模式）。
+4. **StringJoiner vs StringBuilder**：拼接列表用 StringJoiner，拼接多段文本用 StringBuilder。
+
+### Java 语言规范
+```java
+// ✅ 推荐：switch 表达式
+return switch (mimeType) {
+    case "image/png" -> "png";
+    case "image/jpeg" -> "jpg";
+    default -> "bin";
+};
+
+// ❌ 不推荐：传统 if-else 链
+if ("image/png".equals(mimeType)) return "png";
+if ("image/jpeg".equals(mimeType)) return "jpg";
+return "bin";
+```
+
+### 错误处理偏好
+```java
+// ✅ 推荐：try-with-resources 处理 IO
+try (BufferedWriter bw = Files.newBufferedWriter(path, UTF_8)) {
+    bw.write(content);
+} catch (IOException e) {
+    throw new RuntimeException("Failed to write: " + path, e);
+}
+
+// ❌ 避免：手动 close
+BufferedWriter bw = null;
+try {
+    bw = Files.newBufferedWriter(path, UTF_8);
+} finally {
+    if (bw != null) bw.close();
+}
+```
+
+## 本项目特殊规则
+
+### Handler 实现模板
+当生成新的 DocumentHandler 实现时：
+```java
+public class XxxHandler implements DocumentHandler {
+    @Override
+    public boolean supports(String fileName) { ... }
+
+    @Override
+    public UnpackResult unpack(InputStream is, String fileName) { ... }
+
+    @Override
+    public ExtractionResult extract(InputStream is, String fileName) { ... }
+}
+```
+
+### 文件修改安全
+- **不要**删除 `src/main/java` 下的已有文件。
+- **不要**修改 `DocumentHandler.java` 接口签名（如需新增方法必须加 default）。
+- **可以**在 `pom.xml` 中添加新依赖（需说明理由）。
+- **不要**修改 `target/`、`extracted_output/` 等生成目录内容。
+
+### 文件名
+- 文件编码：UTF-8
+- 行结束符：LF (Unix-style)
+- 文件末尾：保留一个空行
+
+## 测试生成规则
+- 测试类放在 `src/test/java/com/dg/tools/extractor/` 对应子包下。
+- 使用 `TestFileFactory` 创建测试用文档字节数组。
+- 断言优先使用 AssertJ (`assertThat(...).isEqualTo(...)`)。
+- 测试名使用 `shouldXXX_whenYYY` 格式（如 `shouldExtractParagraphs_whenDocxHasText`）。
+
+## 文件搜索引导
+- 源码路径: `src/main/java/com/dg/tools/extractor/`
+- 测试路径: `src/test/java/com/dg/tools/extractor/`
+- 规格文档: `SPEC.md`
+- POM: `pom.xml`
+- 输出示例: `extracted_output/`
+
+
+## Task Briefing Template
+
+当用户下达任务时，优先使用 .agents/ai-coding-task-template.md 中的模板结构化输入。
+确保每个任务包含 Goal / Context / Scope / Do Not Change / Verification / Risk 六个字段。
+
+## Prompt Quality Warning
+
+If a user prompt is too vague (e.g. "优化性能", "重构这个模块"), 
+ask for clarification using the template structure before making changes.
+Bad prompts lead to broad diffs and accidental behavior changes.
+
+See: [.agents/examples/good-vs-bad-prompts.md](./.agents/examples/good-vs-bad-prompts.md) for reference.
