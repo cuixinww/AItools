@@ -48,3 +48,16 @@
 ```
 
 如果以上任何一项无法回答，暂停并询问用户。
+
+---
+
+## Code Quality Blockers（新增 v2.0）
+
+在代码审查时，以下问题**直接拒绝合并**：
+
+- [ ] 无 TODO/FIXME/HACK/XXX 未完成标记
+- [ ] 无 UnsupportedOperationException / RuntimeException("not implemented") 空方法
+- [ ] 无 System.out.println / System.err.println / e.printStackTrace()
+- [ ] 全部使用 SLF4J 日志输出
+- [ ] 测试为"不通过而写"（先 Red，再 Green），而非为迎合已有代码而凑
+- [ ] mvn clean test 全部通过，无回归

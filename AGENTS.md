@@ -323,3 +323,73 @@ mvn verify                        # 测试 + 覆盖率报告
 
 *最后更新: 2026-07-24*
 *版本: 2.0*
+
+---
+
+## 14. 完成度与代码质量红线（新增 v2.0）
+
+### 14.1 禁止半成品代码
+
+- **不允许任何未完成的实现**。包括：
+  - 不含 TODO、FIXME、HACK、XXX 等标记（除非是明确标注为未来预留且经用户同意的占位符）。
+  - 不包含只抛了 UnsupportedOperationException / RuntimeException 的空方法。
+  - 不出现"逻辑写到一半就终止"的情况。每个方法必须完整实现，或干脆不写（等需求确认后再写）。
+- **"Done"的定义**：一个方法/文件只有在满足以下条件时才叫完成：
+  - 逻辑完整，无占位符
+  - 参数校验完整（null / empty / 非法值均有处理）
+  - 异常处理完整（try-catch + 错误记录，不吞异常）
+  - 有对应的单元测试覆盖正常路径 + 边界条件 + 异常路径
+  - mvn test 通过
+
+### 14.2 日志输出规范
+
+- **禁止使用 System.out.println()、System.err.println()、e.printStackTrace() 等直接输出语句**。
+- **所有日志输出必须通过 SLF4J**：
+
+Correct (SLF4J):
+  import org.slf4j.Logger;
+  import org.slf4j.LoggerFactory;
+
+  private static final Logger log = LoggerFactory.getLogger(DocxHandler.class);
+  log.info("Extracting document: {}", fileName);
+  log.error("Failed to extract file: {}", fileName, e);
+
+Incorrect (direct output):
+  System.out.println("debug info");           // 禁止
+  System.err.println("error happened");       // 禁止
+  e.printStackTrace();                         // 禁止
+
+- 如果在现有代码中发现 System.out.println，应改为 log.xxx()。
+
+### 14.3 TDD 驱动开发原则
+
+- **测试先行（Test-First）**：每次追加或修正功能前，必须先写失败的测试用例，再实现功能。
+  1. 分析需求，确定期望行为。
+  2. 在 src/test/java 下编写 JUnit 5 测试，先确保测试失败（Red）。
+  3. 编写最小可实现功能的代码（Green）。
+  4. 重构，确保仍有测试覆盖（Refactor）。
+  5. 运行全量测试 mvn clean test，确保无回归。
+
+- **TDD 测试的设计原则**：
+  - 测试是为"不通过"而写的，不是为了迎合已有代码而凑的。
+  - 测试用例应覆盖：正常路径、边界条件（空输入、超大文档、嵌套过深）、异常场景（文件格式不支持、IO 失败）。
+  - 测试断言必须验证可观察的外部行为（ExtractionResult 内容），而非内部实现细节。
+
+- **变更后的回归保证**：
+  - 每次功能追加或修正后，必须运行 mvn clean test 确保所有现有测试通过。
+  - 禁止修改现有测试来"凑通过率"——测试失败意味着代码或需求有问题，不是测试的问题。
+
+### 14.4 代码完成自检清单（每次提交前执行）
+
+Agent 在提交任何代码前，必须逐项确认：
+
+  [ ] 无 TODO/FIXME/HACK 等未完成标记
+  [ ] 无 UnsupportedOperationException / RuntimeException("not implemented")
+  [ ] 无 System.out.println / System.err.println / e.printStackTrace()
+  [ ] 全部使用 SLF4J 日志输出
+  [ ] 参数校验完整
+  [ ] 异常处理完整（不吞异常，记录到 ExtractionResult.errors）
+  [ ] 至少有一个失败的测试被"修复"为通过（TDD Red-Green）
+  [ ] mvn clean test 全部通过
+  [ ] mvn verify 覆盖率达标
+  [ ] 无回归（现有测试未被修改来凑通过率）
