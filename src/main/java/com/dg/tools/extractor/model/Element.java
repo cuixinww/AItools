@@ -1,5 +1,9 @@
 package com.dg.tools.extractor.model;
 
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
 /**
  * 内容元素（Element）。
  *
@@ -12,13 +16,14 @@ package com.dg.tools.extractor.model;
  *   - content ：元素正文（Markdown 文本、表格等），可为空；
  *   - metadata：附加元信息（单行字符串，如 embed 的 "file: xxx"），可为空。
  */
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
 public class Element {
     private int position;
     private String type;
     private String content;
     private String metadata;
-
-    public Element() {}
 
     public Element(int position, String type, String content) {
         this.position = position;
@@ -26,19 +31,4 @@ public class Element {
         this.content = content;
     }
 
-    public Element(int position, String type, String content, String metadata) {
-        this.position = position;
-        this.type = type;
-        this.content = content;
-        this.metadata = metadata;
-    }
-
-    public int getPosition() { return position; }
-    public void setPosition(int position) { this.position = position; }
-    public String getType() { return type; }
-    public void setType(String type) { this.type = type; }
-    public String getContent() { return content; }
-    public void setContent(String content) { this.content = content; }
-    public String getMetadata() { return metadata; }
-    public void setMetadata(String metadata) { this.metadata = metadata; }
 }

@@ -5,7 +5,10 @@ import com.dg.tools.extractor.excel.RegionSplitter;
 import com.dg.tools.extractor.excel.RegionSplitter.Region;
 import com.dg.tools.extractor.model.*;
 import org.apache.poi.ss.usermodel.*;
-import org.apache.poi.ss.usermodel.Workbook;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
 
 import java.io.InputStream;
 import java.util.List;
@@ -20,15 +23,29 @@ import java.util.StringJoiner;
  *   - 大小表分流：小表（≤50 行且 ≤10 列）直接渲染为 Markdown；
  *                  大表（超出阈值）仅写 data_ref 引用 + 完整 CSV 到 data/，避免正文膨胀；
  *   - CSV 切片：大表行数 >500 时由 {@link com.dg.tools.extractor.excel.CsvSlicer} 切分为 100 行/块。
+ *
+ * 对应 SPEC §9 路由表：.xlsx/.xls → ExcelHandler。
  */
-public class ExcelHandler implements DocumentHandler {
+@Component
+@Slf4j
+public class ExcelHandler extends AbstractHandler {
 
-    /** 判定「小表」的行列阈值：行数上限。超过则视为大表走 data_ref。 */
-    private static final int LARGE_TABLE_THRESHOLD = 50;
+    private final int largeTableThreshold;
+    private final int columnThreshold;
 
-    /**
-     * 是否支持该文件：匹配 .xlsx 与 .xls。
-     */
+    public ExcelHandler() {
+        this.largeTableThreshold = 50;
+        this.columnThreshold = 10;
+    }
+
+    @Autowired
+    public ExcelHandler(
+            @Value("${extractor.excel.large-table-threshold:50}") int largeTableThreshold,
+            @Value("${extractor.excel.column-threshold:10}") int columnThreshold) {
+        this.largeTableThreshold = largeTableThreshold;
+        this.columnThreshold = columnThreshold;
+    }
+
     @Override
     public boolean supports(String fileName) {
         if (fileName == null) return false;
@@ -36,16 +53,10 @@ public class ExcelHandler implements DocumentHandler {
         return lower.endsWith(".xlsx") || lower.endsWith(".xls");
     }
 
-    /**
-     * 阶段 1 拆包：仅抽取工作簿内全部图片（不含单元格文本）。
-     */
     @Override
-    public UnpackResult unpack(InputStream is, String fileName) {
-        if (is == null) {
-            throw new IllegalArgumentException("InputStream must not be null");
-        }
+    protected ExtractionResult doUnpack(InputStream is, String fileName) throws Exception {
         String fileType = detectFileType(fileName);
-        UnpackResult unpacked = new UnpackResult(fileType, fileName);
+        ExtractionResult unpacked = ExtractionResult.of(fileType, fileName);
         int pos = 0;
 
         try (Workbook wb = WorkbookFactory.create(is)) {
@@ -57,22 +68,17 @@ public class ExcelHandler implements DocumentHandler {
                 pos++;
             }
         } catch (Exception e) {
-            throw new RuntimeException("Failed to unpack excel: " + fileName, e);
+            log.error("Failed to unpack excel: {}", fileName, e);
+            unpacked.addError("unpack error: " + e.getMessage());
         }
 
         return unpacked;
     }
 
-    /**
-     * 阶段 2 解析：逐 Sheet 处理，先填充合并单元格，再按区域切分分别输出。
-     */
     @Override
-    public ExtractionResult extract(InputStream is, String fileName) {
-        if (is == null) {
-            throw new IllegalArgumentException("InputStream must not be null");
-        }
+    protected ExtractionResult doExtract(InputStream is, String fileName) throws Exception {
         String fileType = detectFileType(fileName);
-        ExtractionResult result = new ExtractionResult(fileType, fileName);
+        ExtractionResult result = ExtractionResult.of(fileType, fileName);
         int position = 0;
 
         try (Workbook wb = WorkbookFactory.create(is)) {
@@ -80,30 +86,25 @@ public class ExcelHandler implements DocumentHandler {
                 Sheet sheet = wb.getSheetAt(s);
                 String sheetName = sheet.getSheetName();
 
-                // 合并单元格填充，得到矩形化的行数据
                 List<List<String>> allRows = MergeCellResolver.readRows(sheet);
                 if (allRows.isEmpty()) continue;
 
-                // 按列填充率把宽表切成多个独立区域
                 List<Region> regions = RegionSplitter.split(allRows);
                 for (int ri = 0; ri < regions.size(); ri++) {
                     Region region = regions.get(ri);
                     List<List<String>> regionRows = region.rows;
                     if (regionRows.isEmpty()) continue;
 
-                    // 区域标题（多区域时附带区域编号，便于区分）
                     String label = regions.size() > 1
                             ? "[Sheet: " + sheetName + " / Region " + (ri + 1) + "]"
                             : "[Sheet: " + sheetName + "]";
                     result.addElement(new Element(position++, "sheet_header", label));
 
-                    // 智能定位表头行（首个非空单元格数 ≥2 的行）
                     int headerIdx = findHeaderRowIndex(regionRows);
                     List<String> headerRow = regionRows.get(headerIdx);
                     List<List<String>> tableRows = regionRows.subList(headerIdx, regionRows.size());
 
-                    if (tableRows.size() <= LARGE_TABLE_THRESHOLD && headerRow.size() <= 10) {
-                        // 小表 —— 全量渲染为 Markdown 表格
+                    if (tableRows.size() <= largeTableThreshold && headerRow.size() <= columnThreshold) {
                         StringBuilder md = new StringBuilder();
                         for (int r = 0; r < tableRows.size(); r++) {
                             md.append("| ").append(String.join(" | ", tableRows.get(r))).append(" |\n");
@@ -115,13 +116,11 @@ public class ExcelHandler implements DocumentHandler {
                         }
                         result.addElement(new Element(position++, "table", md.toString().trim()));
                     } else {
-                        // 大表 —— 以 data_ref 形式引用（保留空列名避免列错位）
                         StringJoiner schema = new StringJoiner(" | ");
                         for (String cell : headerRow) {
                             schema.add(cell != null ? cell.trim() : "");
                         }
 
-                        // 构造预览：列名 + 前 2 行数据
                         StringBuilder preview = new StringBuilder();
                         preview.append("Columns: ").append(schema).append("\n");
                         int previewEnd = Math.min(1 + 2, tableRows.size());
@@ -136,7 +135,6 @@ public class ExcelHandler implements DocumentHandler {
                             preview.append(rowStr).append("\n");
                         }
 
-                        // 记录大表信息（含全部行，供 StoreWriter 写完整 CSV）
                         LargeTableInfo lti = new LargeTableInfo(
                                 sheetName, position++, schema.toString(),
                                 preview.toString().trim(), tableRows.size(), tableRows
@@ -146,17 +144,16 @@ public class ExcelHandler implements DocumentHandler {
                 }
             }
 
-            // 抽取工作簿级图片
             extractImages(wb, result, position);
 
         } catch (Exception e) {
-            throw new RuntimeException("Failed to parse excel: " + fileName, e);
+            log.error("Failed to parse excel: {}", fileName, e);
+            result.addError("parse error: " + e.getMessage());
         }
 
         return result;
     }
 
-    /** 抽取工作簿内图片，位置序号从当前 position 之后累计。 */
     private void extractImages(Workbook wb, ExtractionResult result, int startPosition) {
         try {
             List<? extends PictureData> pictures = wb.getAllPictures();
@@ -172,10 +169,6 @@ public class ExcelHandler implements DocumentHandler {
         }
     }
 
-    /**
-     * 智能定位表头行：返回第一个「非空单元格数 ≥ 2」的行索引；
-     * 若没有任何行满足，则回退为第 0 行。
-     */
     private int findHeaderRowIndex(List<List<String>> allRows) {
         for (int i = 0; i < allRows.size(); i++) {
             long nonEmpty = allRows.get(i).stream()
@@ -188,13 +181,11 @@ public class ExcelHandler implements DocumentHandler {
 
     // ==================== 工具方法 ====================
 
-    /** 根据文件名判定文件类型（.xls → "xls"，其余 → "xlsx"）。 */
     private static String detectFileType(String fileName) {
         if (fileName != null && fileName.toLowerCase().endsWith(".xls")) return "xls";
         return "xlsx";
     }
 
-    /** 根据 MIME 类型映射图片扩展名；无法识别时尝试从子类型提取或回退 "bin"。 */
     private static String detectImageFormat(String mimeType) {
         if (mimeType == null) return "bin";
         return switch (mimeType) {
@@ -207,7 +198,6 @@ public class ExcelHandler implements DocumentHandler {
             case "image/x-wmf" -> "wmf";
             case "image/svg+xml" -> "svg";
             default -> {
-                // 尝试从 MIME 子类型提取扩展名（如 "image/webp" → "webp"）
                 int slash = mimeType.indexOf('/');
                 yield slash > 0 ? mimeType.substring(slash + 1) : "bin";
             }

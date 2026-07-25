@@ -2,9 +2,9 @@ package com.dg.tools.extractor;
 
 import com.dg.tools.extractor.excel.CsvSlicer;
 import com.dg.tools.extractor.model.*;
-import com.dg.tools.extractor.model.LargeTableInfo;
-import com.fasterxml.jackson.core.JsonProcessingException;
+import com.dg.tools.extractor.util.StringUtils;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.extern.slf4j.Slf4j;
 
 import java.io.BufferedWriter;
 import java.io.IOException;
@@ -16,7 +16,6 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.StringJoiner;
 
 /**
  * 结构化产物写出器（StoreWriter）。
@@ -31,6 +30,7 @@ import java.util.StringJoiner;
  *
  * 该工具类无状态（除静态常量与共享 ObjectMapper 外），可安全复用。
  */
+@Slf4j
 public class StoreWriter {
 
     /** 单个 chunk 包含的元素数量（默认 50）。 */
@@ -76,7 +76,7 @@ public class StoreWriter {
             for (LargeTableInfo lt : result.getLargeTables()) {
                 bw.write("# POS: " + lt.getPosition() + " | TYPE: data_ref | " +
                         "schema: " + lt.getSchema() + " | rows: " + lt.getRowCount() +
-                        " | file: data/" + sanitizeFileName(lt.getSheetName()) + ".csv");
+                         " | file: data/" + StringUtils.sanitizeFileName(lt.getSheetName()) + ".csv");
                 bw.newLine();
                 if (lt.getPreview() != null && !lt.getPreview().isEmpty()) {
                     // 预览行前加 "> " 前缀，避免破坏 Markdown 结构
@@ -91,7 +91,7 @@ public class StoreWriter {
             // 图片引用（指向 media/ 下原始文件）
             for (ImageFile img : result.getImages()) {
                 bw.write("# POS: " + img.getPosition() + " | TYPE: image | " +
-                        "file: media/" + sanitizeFileName(img.getFileName()));
+                        "file: media/" + StringUtils.sanitizeFileName(img.getFileName()));
                 bw.newLine();
                 bw.newLine();
             }
@@ -145,7 +145,7 @@ public class StoreWriter {
         // 大表索引：记录每个大表对应的 CSV 文件及所在 chunk
         List<Map<String, Object>> largeTables = new ArrayList<>();
         for (LargeTableInfo lt : result.getLargeTables()) {
-            String csvFile = sanitizeFileName(lt.getSheetName()) + ".csv";
+            String csvFile = StringUtils.sanitizeFileName(lt.getSheetName()) + ".csv";
             int chunkIdx = lt.getPosition() / CHUNK_SIZE;
 
             Map<String, Object> tbl = new LinkedHashMap<>();
@@ -224,15 +224,10 @@ public class StoreWriter {
         Files.createDirectories(dataDir);
 
         for (LargeTableInfo lt : result.getLargeTables()) {
-            Path csvFile = dataDir.resolve(sanitizeFileName(lt.getSheetName()) + ".csv");
+            Path csvFile = dataDir.resolve(StringUtils.sanitizeFileName(lt.getSheetName()) + ".csv");
             try (BufferedWriter bw = Files.newBufferedWriter(csvFile, StandardCharsets.UTF_8)) {
-                // 逐行写出，单元格做 CSV 转义
                 for (List<String> row : lt.getAllRows()) {
-                    StringJoiner sj = new StringJoiner(",");
-                    for (String cell : row) {
-                        sj.add(escapeCsv(cell));
-                    }
-                    bw.write(sj.toString());
+                    bw.write(StringUtils.toCsvLine(row));
                     bw.newLine();
                 }
             }
@@ -264,6 +259,7 @@ public class StoreWriter {
             entry.put("element_count", d.elementCount);
             entry.put("data_ref_count", d.dataRefCount);
             entry.put("image_count", d.imageCount);
+            entry.put("chunk_count", d.chunkCount);
             if (d.parentInfo != null) {
                 entry.put("parent", d.parentInfo);
             }
@@ -278,8 +274,9 @@ public class StoreWriter {
 
         try {
             return JSON.writerWithDefaultPrettyPrinter().writeValueAsString(root);
-        } catch (JsonProcessingException e) {
-            throw new RuntimeException("Failed to serialize manifest JSON", e);
+        } catch (Exception e) {
+            log.error("Failed to serialize manifest JSON", e);
+            return "{\"error\": \"serialization failed\"}";
         }
     }
 
@@ -296,6 +293,7 @@ public class StoreWriter {
         public int elementCount;
         public int dataRefCount;
         public int imageCount;
+        public int chunkCount;
         public final String parentInfo;
         public String status;
         public String filterReason;
@@ -303,7 +301,7 @@ public class StoreWriter {
 
         // 阶段 2 回填统计版构造器
         public DocInfo(int seq, String dir, String source, String sourceCopy, String type,
-                       int elementCount, int dataRefCount, int imageCount, String parentInfo) {
+                       int elementCount, int dataRefCount, int imageCount, int chunkCount, String parentInfo) {
             this.seq = seq;
             this.dir = dir;
             this.source = source;
@@ -312,6 +310,7 @@ public class StoreWriter {
             this.elementCount = elementCount;
             this.dataRefCount = dataRefCount;
             this.imageCount = imageCount;
+            this.chunkCount = chunkCount;
             this.parentInfo = parentInfo;
             this.status = "done";
         }
@@ -327,6 +326,7 @@ public class StoreWriter {
             this.elementCount = 0;
             this.dataRefCount = 0;
             this.imageCount = 0;
+            this.chunkCount = 0;
             this.parentInfo = parentInfo;
             this.status = status;
         }
@@ -350,21 +350,6 @@ public class StoreWriter {
             bw.write(elem.getContent()); bw.newLine();
         }
         bw.newLine();
-    }
-
-    /** 文件名清洗：仅保留字母/数字/中文等 unicode 文字/下划线/连字符，合并连续下划线。 */
-    private String sanitizeFileName(String name) {
-        return name.replaceAll("[^a-zA-Z0-9\\u4e00-\\u9fa5\\u0400-\\u04FF\\u0600-\\u06FF\\uAC00-\\uD7AF_-]", "_")
-                .replaceAll("_+", "_");
-    }
-
-    /** CSV 单元格转义：含逗号/引号/换行的用双引号包裹并将内部引号转义为双引号。 */
-    private String escapeCsv(String value) {
-        if (value == null) return "";
-        if (value.contains(",") || value.contains("\"") || value.contains("\n") || value.contains("\r")) {
-            return "\"" + value.replace("\"", "\"\"") + "\"";
-        }
-        return value;
     }
 
 }

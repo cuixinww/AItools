@@ -2,7 +2,10 @@ package com.dg.tools.extractor.handler;
 
 import com.dg.tools.extractor.model.ExtractionResult;
 import com.dg.tools.extractor.model.ImageFile;
-import com.dg.tools.extractor.model.UnpackResult;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
 
 import java.io.InputStream;
 import java.util.Set;
@@ -14,21 +17,27 @@ import java.util.Set;
  * 因此 unpack 与 extract 都只是把图片原始字节原样保留，
  * 供上层在 media/ 目录中保存，并交由阶段 1.5 的视觉模型生成描述。
  *
- * 支持的图片扩展名：png / jpg / jpeg / gif / bmp / tiff / tif / webp。
+ * 对应 SPEC §6 IMAGE + §9 路由表：图片 → ImageHandler。
  */
-public class ImageHandler implements DocumentHandler {
+@Component
+@Slf4j
+public class ImageHandler extends AbstractHandler {
 
-    /** 支持的图片扩展名集合。 */
     private static final Set<String> SUPPORTED_EXTENSIONS = Set.of(
             "png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "webp"
     );
 
-    /** 单张图片大小上限（100 MB）。 */
-    private static final int MAX_IMAGE_BYTES = 100 * 1024 * 1024;
+    private final int maxImageBytes;
 
-    /**
-     * 是否支持该文件：按扩展名判断是否为受支持的图片类型。
-     */
+    public ImageHandler() {
+        this.maxImageBytes = 100 * 1024 * 1024;
+    }
+
+    @Autowired
+    public ImageHandler(@Value("${extractor.image.max-bytes:104857600}") int maxImageBytes) {
+        this.maxImageBytes = maxImageBytes;
+    }
+
     @Override
     public boolean supports(String fileName) {
         if (fileName == null) return false;
@@ -38,49 +47,44 @@ public class ImageHandler implements DocumentHandler {
         return SUPPORTED_EXTENSIONS.contains(ext);
     }
 
-    /**
-     * 阶段 1 拆包：把整张图片作为 image 元素原样保留。
-     */
     @Override
-    public UnpackResult unpack(InputStream is, String fileName) {
-        if (is == null) {
-            throw new IllegalArgumentException("InputStream must not be null");
-        }
-        UnpackResult unpacked = new UnpackResult("image", fileName);
+    protected ExtractionResult doUnpack(InputStream is, String fileName) throws Exception {
+        ExtractionResult unpacked = ExtractionResult.of("image", fileName);
         try {
             byte[] data = is.readAllBytes();
+            if (data.length > maxImageBytes) {
+                log.warn("Image too large: {} ({} MB)", fileName, data.length / (1024 * 1024));
+                unpacked.addError("image too large: " + fileName);
+                return unpacked;
+            }
             unpacked.addImage(new ImageFile(fileName, 0, data, normalizeFormat(fileName)));
         } catch (Exception e) {
-            throw new RuntimeException("Failed to unpack image: " + fileName, e);
+            log.error("Failed to unpack image: {}", fileName, e);
+            unpacked.addError("unpack error: " + e.getMessage());
         }
         return unpacked;
     }
 
-    /**
-     * 阶段 2 解析：同样原样保留图片字节（含大小上限校验）。
-     */
     @Override
-    public ExtractionResult extract(InputStream is, String fileName) {
-        if (is == null) {
-            throw new IllegalArgumentException("InputStream must not be null");
-        }
-        ExtractionResult result = new ExtractionResult("image", fileName);
+    protected ExtractionResult doExtract(InputStream is, String fileName) throws Exception {
+        ExtractionResult result = ExtractionResult.of("image", fileName);
 
         try {
             byte[] data = is.readAllBytes();
-            if (data.length > MAX_IMAGE_BYTES) {
-                throw new RuntimeException("Image too large: " + fileName
-                        + " (" + (data.length / (1024 * 1024)) + " MB)");
+            if (data.length > maxImageBytes) {
+                log.warn("Image too large: {} ({} MB)", fileName, data.length / (1024 * 1024));
+                result.addError("image too large: " + fileName);
+                return result;
             }
             result.addImage(new ImageFile(fileName, 0, data, normalizeFormat(fileName)));
         } catch (Exception e) {
-            throw new RuntimeException("Failed to read image: " + fileName, e);
+            log.error("Failed to read image: {}", fileName, e);
+            result.addError("parse error: " + e.getMessage());
         }
 
         return result;
     }
 
-    /** 把扩展名归一化（jpeg→jpg，tif→tiff），未知则保持原样。 */
     private static String normalizeFormat(String fileName) {
         if (fileName == null) return "png";
         int dot = fileName.lastIndexOf('.');

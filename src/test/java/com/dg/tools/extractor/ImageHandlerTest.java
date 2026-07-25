@@ -1,8 +1,9 @@
-package com.dg.tools.extractor.handler;
+package com.dg.tools.extractor;
 
 import com.dg.tools.extractor.TestFileFactory;
 import com.dg.tools.extractor.model.ExtractionResult;
 import com.dg.tools.extractor.model.ImageFile;
+import com.dg.tools.extractor.handler.ImageHandler;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.*;

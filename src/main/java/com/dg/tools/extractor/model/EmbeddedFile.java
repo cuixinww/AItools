@@ -1,5 +1,9 @@
 package com.dg.tools.extractor.model;
 
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
 /**
  * 内嵌文件（EmbeddedFile）。
  *
@@ -11,23 +15,11 @@ package com.dg.tools.extractor.model;
  *   - position：在父文档中出现的位置序号（用于父上下文回溯）；
  *   - data    ：文件原始字节内容。
  */
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
 public class EmbeddedFile {
     private String fileName;
     private int position;
     private byte[] data;
-
-    public EmbeddedFile() {}
-
-    public EmbeddedFile(String fileName, int position, byte[] data) {
-        this.fileName = fileName;
-        this.position = position;
-        this.data = data;
-    }
-
-    public String getFileName() { return fileName; }
-    public void setFileName(String fileName) { this.fileName = fileName; }
-    public int getPosition() { return position; }
-    public void setPosition(int position) { this.position = position; }
-    public byte[] getData() { return data; }
-    public void setData(byte[] data) { this.data = data; }
 }

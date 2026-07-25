@@ -1,8 +1,9 @@
-package com.dg.tools.extractor.handler;
+package com.dg.tools.extractor;
 
 import com.dg.tools.extractor.TestFileFactory;
 import com.dg.tools.extractor.model.Element;
 import com.dg.tools.extractor.model.ExtractionResult;
+import com.dg.tools.extractor.handler.PdfHandler;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.*;
@@ -11,7 +12,11 @@ class PdfHandlerTest {
 
     private final PdfHandler handler = new PdfHandler();
 
-    // ========== Basic text extraction ==========
+    @Test
+    void shouldSupportPdf() {
+        assertThat(handler.supports("test.pdf")).isTrue();
+        assertThat(handler.supports("test.docx")).isFalse();
+    }
 
     @Test
     void shouldExtractText() throws Exception {
@@ -32,14 +37,11 @@ class PdfHandlerTest {
         assertThat(result.getElements()).isEmpty();
     }
 
-    // ========== New: image extraction ==========
-
     @Test
     void shouldExtractImagesFromPdf() throws Exception {
         byte[] pdf = TestFileFactory.createPdfWithImage();
         ExtractionResult result = handler.extract(TestFileFactory.toInputStream(pdf), "img.pdf");
 
-        // PDF with embedded image should extract the image
         assertThat(result.getImages()).isNotEmpty();
     }
 
@@ -51,11 +53,8 @@ class PdfHandlerTest {
         assertThat(result.getImages()).isEmpty();
     }
 
-    // ========== Support ==========
-
     @Test
-    void shouldSupportPdf() {
-        assertThat(handler.supports("test.pdf")).isTrue();
-        assertThat(handler.supports("test.docx")).isFalse();
+    void shouldHandleNullFileName() {
+        assertThat(handler.supports(null)).isFalse();
     }
 }

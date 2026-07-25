@@ -1,5 +1,6 @@
 package com.dg.tools.extractor.excel;
 
+import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.ss.usermodel.Cell;
 import org.apache.poi.ss.usermodel.DataFormatter;
 import org.apache.poi.ss.usermodel.DateUtil;
@@ -20,6 +21,7 @@ import java.util.Map;
  * 处理后，每一行都被归一化为相同的列数，得到矩形化的二维数据，
  * 便于后续的多区域切分与表格渲染。
  */
+@Slf4j
 public class MergeCellResolver {
 
     /** 工具类，禁止外部实例化。 */
@@ -98,7 +100,7 @@ public class MergeCellResolver {
     // ==================== 单元格取值 ====================
 
     /** POI 的单元格格式化器（处理日期、自定义格式、避免科学计数法等）。 */
-    private static final DataFormatter FORMATTER = new DataFormatter();
+    private static final ThreadLocal<DataFormatter> FORMATTER = ThreadLocal.withInitial(DataFormatter::new);
 
     /** 从指定坐标读取单元格值（行不存在时返回空串）。 */
     private static String getCellValueFromSheet(Sheet sheet, int rowNum, int colNum) {
@@ -124,9 +126,9 @@ public class MergeCellResolver {
         // 优先用 DataFormatter 处理日期、自定义格式，并避免科学计数法
         if (DateUtil.isCellDateFormatted(cell)) {
             try {
-                return FORMATTER.formatCellValue(cell);
+                return FORMATTER.get().formatCellValue(cell);
             } catch (Exception e) {
-                // 失败则落到原始值
+                log.warn("Failed to format date cell", e);
             }
         }
         // 整数范围内直接以 long 输出，避免 ".0"
@@ -137,8 +139,9 @@ public class MergeCellResolver {
         }
         // 其余情况用 BigDecimal 风格格式化（DataFormatter 最稳妥）
         try {
-            return FORMATTER.formatCellValue(cell);
+            return FORMATTER.get().formatCellValue(cell);
         } catch (Exception e) {
+            log.warn("Failed to format numeric cell, falling back to raw value", e);
             return String.valueOf(v);
         }
     }
@@ -146,21 +149,20 @@ public class MergeCellResolver {
     /** 公式单元格格式化：优先取缓存的数值结果，失败再依次尝试字符串 / 布尔 / 公式文本。 */
     private static String formatFormula(Cell cell) {
         try {
-            // 尝试缓存的数值结果
             return String.valueOf(cell.getNumericCellValue());
         } catch (Exception e1) {
-            try {
-                // 尝试缓存的字符串结果
-                return cell.getStringCellValue();
-            } catch (Exception e2) {
-                try {
-                    // 尝试缓存的布尔结果
-                    return String.valueOf(cell.getBooleanCellValue());
-                } catch (Exception e3) {
-                    // 最后兜底返回公式文本
-                    return cell.getCellFormula();
-                }
-            }
+            log.warn("Failed to read formula numeric result, trying string", e1);
+        }
+        try {
+            return cell.getStringCellValue();
+        } catch (Exception e2) {
+            log.warn("Failed to read formula string result, trying boolean", e2);
+        }
+        try {
+            return String.valueOf(cell.getBooleanCellValue());
+        } catch (Exception e3) {
+            log.warn("Failed to read formula boolean result, returning formula text", e3);
+            return cell.getCellFormula();
         }
     }
 

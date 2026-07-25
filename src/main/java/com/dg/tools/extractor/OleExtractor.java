@@ -1,5 +1,6 @@
 package com.dg.tools.extractor;
 
+import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.poifs.filesystem.*;
 
 import java.io.ByteArrayInputStream;
@@ -23,6 +24,7 @@ import java.util.Set;
  *
  * 此外，当输入本身根本不是合法 OLE2 容器时，会尝试把整段字节当作裸 Ole10Native 来解析。
  */
+@Slf4j
 public class OleExtractor {
 
     /** 递归展开的最大深度，防止 OLE 目录树过深。 */
@@ -50,7 +52,7 @@ public class OleExtractor {
         try {
             return doExtract(oleData);
         } catch (Exception e) {
-            // 若不是合法 OLE2 容器，则尝试整体当作裸 Ole10Native 流解析
+            log.warn("OLE extraction failed, trying raw Ole10Native fallback", e);
             Map<String, byte[]> raw = tryRawOle10Native(oleData);
             if (!raw.isEmpty()) return raw;
             return Collections.emptyMap();

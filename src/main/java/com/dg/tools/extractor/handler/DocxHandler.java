@@ -2,12 +2,13 @@ package com.dg.tools.extractor.handler;
 
 import com.dg.tools.extractor.OleExtractor;
 import com.dg.tools.extractor.model.*;
+import com.dg.tools.extractor.util.StringUtils;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.openxml4j.opc.OPCPackage;
 import org.apache.poi.openxml4j.opc.PackagePart;
 import org.apache.poi.xwpf.usermodel.*;
+import org.springframework.stereotype.Component;
 
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
@@ -26,12 +27,17 @@ import java.util.Map;
  *   保证图片 / 嵌入对象与其上下文段落的相对顺序被保留。
  *
  * OLE 对象通过 {@link OleExtractor} 进一步解出内部真实文件。
+ *
+ * 对应 SPEC §9 路由表：.docx/.docm → DocxHandler。
  */
-public class DocxHandler implements DocumentHandler {
+@Component
+@Slf4j
+public class DocxHandler extends AbstractHandler {
 
-    /**
-     * 是否支持该文件。匹配 .docx 与 .docm（启用宏的 Word 文档）。
-     */
+    public DocxHandler() {
+        super();
+    }
+
     @Override
     public boolean supports(String fileName) {
         if (fileName == null) return false;
@@ -41,19 +47,12 @@ public class DocxHandler implements DocumentHandler {
 
     // ==================== 阶段 1：UNPACK（拆包） ====================
 
-    /**
-     * 阶段 1 拆包：抽取图片与内嵌文件（不含文本解析）。
-     */
     @Override
-    public UnpackResult unpack(InputStream is, String fileName) {
-        if (is == null) {
-            throw new IllegalArgumentException("InputStream must not be null");
-        }
-        UnpackResult unpacked = new UnpackResult("docx", fileName);
+    protected ExtractionResult doUnpack(InputStream is, String fileName) throws Exception {
+        ExtractionResult unpacked = ExtractionResult.of("docx", fileName);
         int position = 0;
 
         try (XWPFDocument doc = new XWPFDocument(is)) {
-            // 正文段落（含表格内的）中的图片
             for (IBodyElement element : doc.getBodyElements()) {
                 if (element instanceof XWPFParagraph para) {
                     int added = unpackImagesFromParagraph(para, unpacked, position);
@@ -69,29 +68,25 @@ public class DocxHandler implements DocumentHandler {
                     }
                 }
             }
-            // 页眉 / 页脚中的图片
             unpackHeaderFooterImages(doc, unpacked, position);
-
-            // 内嵌文件（普通附件 + OLE 对象）
             unpackEmbeddedFiles(doc, unpacked);
             unpackOleEmbeddings(doc, unpacked);
 
         } catch (Exception e) {
-            throw new RuntimeException("Failed to unpack docx: " + fileName, e);
+            log.error("Failed to unpack docx: {}", fileName, e);
+            unpacked.addError("unpack error: " + e.getMessage());
         }
 
         return unpacked;
     }
 
-    /** 从单个段落的 run 中抽取内嵌图片（Excel/Word 图片以 XWPFPicture 形式挂在 run 上）。 */
-    private int unpackImagesFromParagraph(XWPFParagraph para, UnpackResult result, int position) {
+    private int unpackImagesFromParagraph(XWPFParagraph para, ExtractionResult result, int position) {
         int count = 0;
         for (XWPFRun run : para.getRuns()) {
             for (XWPFPicture pic : run.getEmbeddedPictures()) {
                 XWPFPictureData picData = pic.getPictureData();
                 String picFileName = picData.getFileName();
                 if (picFileName == null || picFileName.isEmpty()) {
-                    // 缺少文件名时按位置自动命名，保证唯一
                     picFileName = "image_" + (position + count) + "." + picData.suggestFileExtension();
                 }
                 result.addImage(new ImageFile(picFileName, position + count,
@@ -102,8 +97,7 @@ public class DocxHandler implements DocumentHandler {
         return count;
     }
 
-    /** 抽取页眉与页脚中的图片，位置序号在正文图片之后继续累计。 */
-    private void unpackHeaderFooterImages(XWPFDocument doc, UnpackResult result, int position) {
+    private void unpackHeaderFooterImages(XWPFDocument doc, ExtractionResult result, int position) {
         int pos = position;
         for (XWPFHeader header : doc.getHeaderList()) {
             if (header == null) continue;
@@ -123,53 +117,33 @@ public class DocxHandler implements DocumentHandler {
         }
     }
 
-    /** 抽取 /word/embeddings/ 下的普通内嵌文件（排除 OLE 类型）。 */
-    private void unpackEmbeddedFiles(XWPFDocument doc, UnpackResult result) {
-        int pos = 0;
+    private void unpackEmbeddedFiles(XWPFDocument doc, ExtractionResult result) {
+        int pos = result.getEmbeddedFiles().size();
         try {
-            OPCPackage pkg = doc.getPackage();
-            for (PackagePart part : pkg.getParts()) {
-                String partName = part.getPartName().getName();
-                if (partName == null || !partName.contains("embeddings")) continue;
-
-                String contentType = part.getContentType();
-                // OLE 对象交给专门的 unpackOleEmbeddings 处理，这里跳过
-                if (contentType != null && (contentType.contains("oleObject") || contentType.contains("ole"))) continue;
-
-                String embeddedFileName = partName.substring(partName.lastIndexOf('/') + 1);
-                if (embeddedFileName.isEmpty()) continue;
-
-                byte[] fileBytes = readPartBytes(part);
-                result.addEmbedded(new EmbeddedFile(embeddedFileName, pos++, fileBytes));
+            for (PackagePart part : findEmbeddingParts(doc.getPackage(), false)) {
+                String name = partNameFromPart(part);
+                if (name == null) continue;
+                result.addEmbedded(new EmbeddedFile(name, pos++, StringUtils.readBytes(part.getInputStream())));
             }
         } catch (Exception e) {
-            // 单个内嵌文件抽取失败不影响整体，仅记录错误
             result.addError("unpack embedded files: " + e.getMessage());
         }
     }
 
-    /** 抽取 /word/embeddings/ 下的 OLE 对象，并用 OleExtractor 解出内部真实文件。 */
-    private void unpackOleEmbeddings(XWPFDocument doc, UnpackResult result) {
+    private void unpackOleEmbeddings(XWPFDocument doc, ExtractionResult result) {
         int pos = result.getEmbeddedFiles().size();
         try {
-            OPCPackage pkg = doc.getPackage();
-            for (PackagePart part : pkg.getParts()) {
-                String partName = part.getPartName().getName();
-                if (partName == null || !partName.contains("embeddings")) continue;
-
-                String contentType = part.getContentType();
-                if (contentType == null) continue;
-                if (!contentType.contains("oleObject") && !contentType.contains("ole")) continue;
-
-                byte[] oleBytes = readPartBytes(part);
+            for (PackagePart part : findEmbeddingParts(doc.getPackage(), true)) {
+                byte[] oleBytes = StringUtils.readBytes(part.getInputStream());
                 Map<String, byte[]> extracted = OleExtractor.extract(oleBytes);
-                for (Map.Entry<String, byte[]> entry : extracted.entrySet()) {
+                for (var entry : extracted.entrySet()) {
                     result.addEmbedded(new EmbeddedFile(entry.getKey(), pos++, entry.getValue()));
                 }
                 if (extracted.isEmpty() && oleBytes.length > 0) {
-                    // 无法解出的 OLE 也保留其原始字节，便于事后排查
-                    String innerFileName = partName.substring(partName.lastIndexOf('/') + 1);
-                    result.addEmbedded(new EmbeddedFile(innerFileName, pos++, oleBytes));
+                    String name = partNameFromPart(part);
+                    if (name != null) {
+                        result.addEmbedded(new EmbeddedFile(name, pos++, oleBytes));
+                    }
                 }
             }
         } catch (Exception e) {
@@ -179,73 +153,44 @@ public class DocxHandler implements DocumentHandler {
 
     // ==================== 阶段 2：EXTRACT（解析） ====================
 
-    /**
-     * 阶段 2 解析：按文档原始元素顺序遍历，生成结构化 Element 列表。
-     */
     @Override
-    public ExtractionResult extract(InputStream is, String fileName) {
-        if (is == null) {
-            throw new IllegalArgumentException("InputStream must not be null");
-        }
-        ExtractionResult result = new ExtractionResult("docx", fileName);
+    protected ExtractionResult doExtract(InputStream is, String fileName) throws Exception {
+        ExtractionResult result = ExtractionResult.of("docx", fileName);
 
         try (XWPFDocument doc = new XWPFDocument(is)) {
             int position = 0;
 
-            // 1. 页眉 / 页脚 —— 先输出（返回新增元素数）
             position += extractHeadersFooters(doc, result, position);
 
-            // 2. 正文段落、表格、图片
             for (IBodyElement element : doc.getBodyElements()) {
                 if (element instanceof XWPFParagraph para) {
                     position += extractParagraph(para, result, position);
                 } else if (element instanceof XWPFTable table) {
-                    // 表格整体渲染为 Markdown 作为一个元素
                     String md = tableToMarkdown(table);
                     result.addElement(new Element(position++, "table", md));
-                    // 同时抽取表格单元格内的图片
                     for (XWPFTableRow row : table.getRows()) {
                         for (XWPFTableCell cell : row.getTableCells()) {
                             for (XWPFParagraph para : cell.getParagraphs()) {
-                                extractParagraph(para, result, position);
+                                position += unpackImagesFromParagraph(para, result, position);
                             }
                         }
                     }
                 }
             }
 
-            // 3. 内嵌文件（非 OLE）
             extractEmbedded(doc, result);
-
-            // 4. OLE 内嵌文件
             extractOleEmbeddings(doc, result);
 
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to parse docx: " + fileName, e);
+        } catch (Exception e) {
+            log.error("Failed to parse docx: {}", fileName, e);
+            result.addError("parse error: " + e.getMessage());
         }
 
         return result;
     }
 
-    /**
-     * 解析单个段落：抽取其中的图片（作为 image 元素）与文字（作为 paragraph 元素）。
-     * 返回本次新增的元素数量（图片 + 文字），供调用方推进 position。
-     */
     private int extractParagraph(XWPFParagraph para, ExtractionResult result, int position) {
-        int count = 0;
-        for (XWPFRun run : para.getRuns()) {
-            List<XWPFPicture> pictures = run.getEmbeddedPictures();
-            for (XWPFPicture pic : pictures) {
-                XWPFPictureData picData = pic.getPictureData();
-                String picFileName = picData.getFileName();
-                if (picFileName == null || picFileName.isEmpty()) {
-                    picFileName = "image_" + (position + count) + "." + picData.suggestFileExtension();
-                }
-                result.addImage(new ImageFile(picFileName, position + count,
-                        picData.getData(), picData.suggestFileExtension()));
-                count++;
-            }
-        }
+        int count = unpackImagesFromParagraph(para, result, position);
         String text = para.getText();
         if (text != null && !text.isBlank()) {
             result.addElement(new Element(position + count, "paragraph", text.trim()));
@@ -254,7 +199,6 @@ public class DocxHandler implements DocumentHandler {
         return count;
     }
 
-    /** 抽取页眉 / 页脚中的段落与表格，返回新增元素数量。 */
     private int extractHeadersFooters(XWPFDocument doc, ExtractionResult result, int startPosition) {
         int pos = startPosition;
         try {
@@ -286,14 +230,7 @@ public class DocxHandler implements DocumentHandler {
 
     // ==================== 表格渲染 ====================
 
-    /**
-     * 将 XWPFTable 渲染为 Markdown 表格，并处理合并单元格（gridSpan 横向合并）：
-     *   - 先计算表格最大列数（考虑 gridSpan）；
-     *   - 对每个单元格，按 gridSpan 宽度填充多列（合并列后续补空）；
-     *   - 首行之后补一行分隔线（---）。
-     */
     private String tableToMarkdown(XWPFTable table) {
-        // 构建归一化网格：把含有 gridSpan 的单元格按跨度展开
         int totalCols = table.getRows().stream()
                 .mapToInt(row -> row.getTableCells().stream()
                         .mapToInt(cell -> {
@@ -317,19 +254,16 @@ public class DocxHandler implements DocumentHandler {
                 }
                 String cellText = cell.getText().trim();
                 rowCells.add(cellText);
-                // 合并列：后续列补空，保持列对齐
                 for (int s = 1; s < span; s++) {
                     rowCells.add("");
                 }
             }
-            // 末尾若列数不足则补空，避免 Markdown 表格列数不一致
             while (rowCells.size() < totalCols) {
                 rowCells.add("");
             }
 
             md.append("| ").append(String.join(" | ", rowCells)).append(" |\n");
             if (r == 0) {
-                // 首行下方补分隔行
                 md.append("| ").append(rowCells.stream().map(c -> "---")
                         .collect(java.util.stream.Collectors.joining(" | "))).append(" |\n");
             }
@@ -339,58 +273,37 @@ public class DocxHandler implements DocumentHandler {
 
     // ==================== 内嵌 / OLE 抽取 ====================
 
-    /** 阶段 2：抽取普通内嵌文件（非 OLE），并记录一个 embed 元素指向它。 */
     private void extractEmbedded(XWPFDocument doc, ExtractionResult result) {
         try {
-            OPCPackage pkg = doc.getPackage();
-            for (PackagePart part : pkg.getParts()) {
-                String partName = part.getPartName().getName();
-                if (partName == null || !partName.contains("embeddings")) continue;
-
-                String contentType = part.getContentType();
-                if (contentType != null && (contentType.contains("oleObject") || contentType.contains("ole"))) continue;
-
-                String embeddedFileName = partName.substring(partName.lastIndexOf('/') + 1);
-                if (embeddedFileName.isEmpty()) continue;
-
-                byte[] fileBytes = readPartBytes(part);
-                int embedPosition = result.getElements().size();
-                result.addEmbedded(new EmbeddedFile(embeddedFileName, embedPosition, fileBytes));
-                result.addElement(new Element(embedPosition, "embed",
-                        null, "file: " + embeddedFileName));
+            for (PackagePart part : findEmbeddingParts(doc.getPackage(), false)) {
+                String name = partNameFromPart(part);
+                if (name == null) continue;
+                int pos = result.getElements().size();
+                result.addEmbedded(new EmbeddedFile(name, pos, StringUtils.readBytes(part.getInputStream())));
+                result.addElement(new Element(pos, "embed", null, "file: " + name));
             }
         } catch (Exception e) {
             result.addError("embedded files: " + e.getMessage());
         }
     }
 
-    /** 阶段 2：抽取 OLE 内嵌对象，用 OleExtractor 解出内部真实文件并记录 embed 元素。 */
     private void extractOleEmbeddings(XWPFDocument doc, ExtractionResult result) {
         try {
-            OPCPackage pkg = doc.getPackage();
-            for (PackagePart part : pkg.getParts()) {
-                String partName = part.getPartName().getName();
-                if (partName == null || !partName.contains("embeddings")) continue;
-
-                String contentType = part.getContentType();
-                if (contentType == null) continue;
-                if (!contentType.contains("oleObject") && !contentType.contains("ole")) continue;
-
-                byte[] oleBytes = readPartBytes(part);
+            for (PackagePart part : findEmbeddingParts(doc.getPackage(), true)) {
+                byte[] oleBytes = StringUtils.readBytes(part.getInputStream());
                 Map<String, byte[]> extracted = OleExtractor.extract(oleBytes);
                 for (var entry : extracted.entrySet()) {
-                    int embedPosition = result.getElements().size();
-                    result.addEmbedded(new EmbeddedFile(entry.getKey(), embedPosition, entry.getValue()));
-                    result.addElement(new Element(embedPosition, "embed",
-                            null, "file: " + entry.getKey()));
+                    int pos = result.getElements().size();
+                    result.addEmbedded(new EmbeddedFile(entry.getKey(), pos, entry.getValue()));
+                    result.addElement(new Element(pos, "embed", null, "file: " + entry.getKey()));
                 }
                 if (extracted.isEmpty() && oleBytes.length > 0) {
-                    // 无法解出的 OLE 保留原始字节
-                    String innerFileName = partName.substring(partName.lastIndexOf('/') + 1);
-                    int embedPosition = result.getElements().size();
-                    result.addEmbedded(new EmbeddedFile(innerFileName, embedPosition, oleBytes));
-                    result.addElement(new Element(embedPosition, "embed",
-                            null, "file: " + innerFileName));
+                    String name = partNameFromPart(part);
+                    if (name != null) {
+                        int pos = result.getElements().size();
+                        result.addEmbedded(new EmbeddedFile(name, pos, oleBytes));
+                        result.addElement(new Element(pos, "embed", null, "file: " + name));
+                    }
                 }
             }
         } catch (Exception e) {
@@ -398,18 +311,29 @@ public class DocxHandler implements DocumentHandler {
         }
     }
 
-    // ==================== 工具方法 ====================
+    // ==================== 嵌入部件工具 ====================
 
-    /** 读取 OPC 包中某个 Part 的全部原始字节。 */
-    private static byte[] readPartBytes(PackagePart part) throws IOException {
-        try (InputStream partIs = part.getInputStream();
-             ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
-            byte[] buf = new byte[8192];
-            int n;
-            while ((n = partIs.read(buf)) != -1) {
-                baos.write(buf, 0, n);
+    private List<PackagePart> findEmbeddingParts(OPCPackage pkg, boolean oleOnly) {
+        List<PackagePart> parts = new ArrayList<>();
+        try {
+            for (PackagePart part : pkg.getParts()) {
+                String partName = part.getPartName().getName();
+                if (partName == null || !partName.contains("embeddings")) continue;
+                String contentType = part.getContentType();
+                boolean isOle = contentType != null && contentType.contains("oleObject");
+                if (oleOnly != isOle) continue;
+                parts.add(part);
             }
-            return baos.toByteArray();
+        } catch (Exception e) {
+            log.warn("Failed to list embedding parts", e);
         }
+        return parts;
+    }
+
+    private String partNameFromPart(PackagePart part) {
+        String name = part.getPartName().getName();
+        if (name == null) return null;
+        name = name.substring(name.lastIndexOf('/') + 1);
+        return name.isEmpty() ? null : name;
     }
 }

@@ -1,10 +1,13 @@
 package com.dg.tools.extractor;
 
+import lombok.extern.slf4j.Slf4j;
 import org.apache.tika.Tika;
 import org.apache.tika.mime.MimeType;
 import org.apache.tika.mime.MimeTypes;
 
 import java.util.Map;
+
+import static java.util.Map.entry;
 
 /**
  * 文件类型探测器（TypeDetector）。
@@ -16,6 +19,7 @@ import java.util.Map;
  * 对于探测不到或探测为通用类型（octet-stream / text/plain / zip）的情况，
  * 优先信任文件名后缀，以避免把 docx / xlsx 这类「本质也是 zip」的容器误判成 zip。
  */
+@Slf4j
 public class TypeDetector {
 
     /**
@@ -89,8 +93,8 @@ public class TypeDetector {
                     return tikaExt.replace(".", "");
                 }
             }
-        } catch (Exception ignored) {
-            // 类型未知时忽略，继续走文件名回退
+        } catch (Exception e) {
+            log.warn("Failed to get MIME extension for: {}", mime, e);
         }
 
         return fallbackFromName(hintFileName);

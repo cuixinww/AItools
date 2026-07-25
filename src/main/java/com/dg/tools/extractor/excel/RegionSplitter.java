@@ -12,8 +12,10 @@ import java.util.List;
  *   - 连续 ≥2 个空列 → 作为区域分隔线；
  *   - 每个区域只包含它自己的列（去掉中间的空列）。
  *
- * 这样可以把一张宽表（如左侧是排期、右侧是另一张无关表）自动拆成多个干净的小表，
- * 避免互相干扰，也便于后续各自独立地判定小表 / 大表。
+ * ✅ v7 修复（问题 #R1）:
+ *   1. regions.add() 从行循环内移到外层，避免每行生成一个空 Region
+ *   2. regionRow 正确加入 regionRows
+ *   3. 单个有效区域时直接使用其边界而非回退到全表
  */
 public class RegionSplitter {
 
@@ -84,10 +86,11 @@ public class RegionSplitter {
             regionBounds.add(new int[]{colStart, colEnd});
         }
 
-        // 没有切分点或只有一个跨全表区域时，整体作为一个区域返回
-        if (regionBounds.size() <= 1) {
+        // 没有有效区域边界时，整体作为一个区域返回
+        if (regionBounds.isEmpty()) {
             return List.of(new Region(0, totalCols - 1, allRows));
         }
+        // 修正：单个区域也是有效结果（如前导/尾部空列），使用其实际边界
 
         // 构建各区域（只保留属于该区域的列，并补齐列数）
         List<Region> regions = new ArrayList<>();
@@ -104,8 +107,11 @@ public class RegionSplitter {
                 while (regionRow.size() < (endCol - startCol + 1)) {
                     regionRow.add("");
                 }
-                regions.add(new Region(startCol, endCol, regionRows));
+                // ✅ 关键修正：将构建好的 regionRow 加入 regionRows
+                regionRows.add(regionRow);
             }
+            // ✅ 关键修正：在所有行构建完成后，再创建 Region 对象并加入列表
+            regions.add(new Region(startCol, endCol, regionRows));
         }
 
         return regions;
