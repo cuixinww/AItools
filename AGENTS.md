@@ -1,4 +1,4 @@
-﻿# AI Coding 规范 — AGENTS.md
+# AI Coding 规范 — AGENTS.md
 
 > 本文件是 Codex / Claude Code / Cursor / Copilot 等 AI 编程代理的统一工作手册。
 > 所有 AI agent 在执行任务前必须阅读并严格遵守本规范。
@@ -108,10 +108,7 @@ src/main/java/com/dg/tools/extractor/
 
 ---
 
-
-
 ### 3.5 Spring AI Alibaba 专项规范
-
 
 本项目在 Phase 1.5（TRIAGE + IMAGE）中使用 **Spring AI Alibaba** 作为 LLM/视觉大模型的统一调用框架。所有 AI 相关的代码开发必须遵循以下规范：
 
@@ -152,7 +149,7 @@ src/main/java/com/dg/tools/extractor/
 - LLM 调用失败不应阻断整个提取流程（符合"阶段容错"原则）：
   - TRIAGE 调用失败 → 文件标记为 
 elevant（保守放行）。
-  - IMAGE 调用失败 → 保留原图不删除，标记 iltered 并记录原因。
+  - IMAGE 调用失败 → 保留原图不删除，标记 ``filtered`` 并记录原因。
   - AI 检核层调用失败 → 回退到规则链检核。
 - 所有 AI 调用的错误信息必须记录日志（SLF4J），不可静默吞掉。
 
@@ -313,11 +310,6 @@ mvn verify                        # 测试 + 覆盖率报告
 
 ---
 
-*最后更新: 2026-07-24*
-*版本: 1.0*
-
----
-
 ## 11. Prompt 质量要求
 
 每个编码任务必须使用结构化的 Prompt。模糊的 prompt 是导致 AI Agent 行为失控的首要原因。
@@ -344,10 +336,10 @@ mvn verify                        # 测试 + 覆盖率报告
 
 | Skill | 触发场景 | 路径 |
 |-------|---------|------|
-| cp-bug-fix | 修复 bug、调查错误、调试崩溃 | .agents/skills/acp-bug-fix/SKILL.md |
-| cp-feature-add | 新增功能、新增 Handler、新增 Phase | .agents/skills/acp-feature-add/SKILL.md |
-| cp-code-review | Review PR、审查 Diff、审计 AI 代码 | .agents/skills/acp-code-review/SKILL.md |
-| cp-refactor | 重构、清理、简化、模块化 | .agents/skills/acp-refactor/SKILL.md |
+| `acp-bug-fix` | 修复 bug、调查错误、调试崩溃 | .agents/skills/acp-bug-fix/SKILL.md |
+| `acp-feature-add` | 新增功能、新增 Handler、新增 Phase | .agents/skills/acp-feature-add/SKILL.md |
+| `acp-code-review` | Review PR、审查 Diff、审计 AI 代码 | .agents/skills/acp-code-review/SKILL.md |
+| `acp-refactor` | 重构、清理、简化、模块化 | .agents/skills/acp-refactor/SKILL.md |
 
 使用时，Agent 应严格遵循对应 Skill 中的 Workflow 步骤。
 
@@ -400,19 +392,23 @@ mvn verify                        # 测试 + 覆盖率报告
 - **所有日志输出必须通过 SLF4J**：
 
 Correct (SLF4J):
-  import org.slf4j.Logger;
-  import org.slf4j.LoggerFactory;
 
-  private static final Logger log = LoggerFactory.getLogger(DocxHandler.class);
-  log.info("Extracting document: {}", fileName);
-  log.error("Failed to extract file: {}", fileName, e);
+```java
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-Incorrect (direct output):
-  System.out.println("debug info");           // 禁止
-  System.err.println("error happened");       // 禁止
-  e.printStackTrace();                         // 禁止
+private static final Logger log = LoggerFactory.getLogger(DocxHandler.class);
+log.info("Extracting document: {}", fileName);
+log.error("Failed to extract file: {}", fileName, e);
+```
 
-- 如果在现有代码中发现 System.out.println，应改为 log.xxx()。
+Incorrect (直接输出 - 禁止):
+
+```java
+System.out.println("debug info");    // 禁止
+System.err.println("error happened"); // 禁止
+e.printStackTrace();                   // 禁止
+```
 
 ### 14.3 TDD 驱动开发原则
 
@@ -446,5 +442,4 @@ Agent 在提交任何代码前，必须逐项确认：
   [ ] mvn clean test 全部通过
   [ ] mvn verify 覆盖率达标
   [ ] 无回归（现有测试未被修改来凑通过率）
-
 

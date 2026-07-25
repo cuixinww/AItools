@@ -34,7 +34,7 @@ Verification: (mvn test -Dtest=...)
 Risk: (低/中/高)
 ```
 
-详见 [.agents/ai-coding-task-template.md](./.agents/ai-coding-task-template.md)
+详见 [.agents/ai-coding-task-template.md](./ai-coding-task-template.md)
 
 ---
 
