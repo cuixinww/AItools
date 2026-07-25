@@ -11,7 +11,7 @@
 | 属性 | 值 |
 |------|------|
 | 项目名称 | `dg-tools` (AI-powered Requirement Document Quality Checker) |
-| 技术栈 | Java 17, Spring Boot 3.3.5, Apache POI 5.3.0, PDFBox 3.0.2, Tika 2.9.2 |
+| 技术栈 | Java 17, Spring Boot 3.3.5, Apache POI 5.3.0, PDFBox 3.0.2, Tika 2.9.2, **Spring AI Alibaba** |
 | 构建工具 | Maven |
 | 包名 | `com.dg.tools.extractor` |
 | 文档根目录 | `E:\silf\dg_tools` |
@@ -108,6 +108,59 @@ src/main/java/com/dg/tools/extractor/
 
 ---
 
+
+
+### 3.5 Spring AI Alibaba 专项规范
+
+
+本项目在 Phase 1.5（TRIAGE + IMAGE）中使用 **Spring AI Alibaba** 作为 LLM/视觉大模型的统一调用框架。所有 AI 相关的代码开发必须遵循以下规范：
+
+#### 3.5.1 核心依赖与版本管理
+
+- Spring AI Alibaba 的依赖版本变更必须经用户确认，不可自行升级。
+- pom.xml 中新增 AI 相关依赖需注明对应 SPEC 章节（§5 TRIAGE / §6 IMAGE / §8 AI 检核层）。
+- 禁止私自引入其他 LLM SDK（如 openai-java、anthropic-sdk），统一由 Spring AI Alibaba 抽象。
+
+#### 3.5.2 ChatModel / ImageModel 使用规范
+
+- **ChatModel**（LLM 快判 / AI 检核层对话）：
+  - 通过 @Bean 或 @Autowired 注入，不在 Handler 内部直接 new。
+  - Prompt 模板应外部化（支持配置切换），不可硬编码在 Java 字符串中。
+  - 所有 API Key / Endpoint 必须从环境变量或配置中心读取，禁止硬编码。
+
+- **ImageModel**（视觉理解 / 图片描述）：
+  - 输入原始字节数组（InputStream），输出结构化 JSON（标题 + 描述），写入 media/{img}.json。
+  - 必须设置超时和重试策略，避免视觉模型超时导致整个 Phase 1.5 阻塞。
+  - 图片描述结果写失败的，记录到 ExtractionResult.errors 并标记 status: filtered。
+
+#### 3.5.3 Tool / Function Callback 规范
+
+- AI 检核层需要的工具调用（如 CSV 按需加载、文档级优先检索）通过 Spring AI FunctionCallback 注册。
+- 每个 Tool 必须实现幂等性——多次调用不会产生副作用（因为 AI 可能重试）。
+- Tool 的参数命名应与 SPEC 中的数据模型一致（Element / data_ref / chunk_NNNN）。
+
+#### 3.5.4 Token 预算与上下文窗口管理
+
+- AI 检核层的 prompt 构建必须考虑 token 预算：
+  - 完整 body.md ≤ 300 元素时，直接全量注入。
+  - 超过 300 元素时，按优先级采样 + chunks 增量注入。
+- 不得一次性将整个 manifest.json 或所有 CSV 内容放入 prompt。
+- 超出预算时必须降级为「规则链匹配」而非继续调用 LLM。
+
+#### 3.5.5 错误处理与容错
+
+- LLM 调用失败不应阻断整个提取流程（符合"阶段容错"原则）：
+  - TRIAGE 调用失败 → 文件标记为 
+elevant（保守放行）。
+  - IMAGE 调用失败 → 保留原图不删除，标记 iltered 并记录原因。
+  - AI 检核层调用失败 → 回退到规则链检核。
+- 所有 AI 调用的错误信息必须记录日志（SLF4J），不可静默吞掉。
+
+#### 3.5.6 内存安全
+
+- Spring AI 的 Response<AiMessage> 和 GenerateResponse 对象只持有一次调用的结果。
+- 不得将大量 AI 返回内容缓存为静态字段。
+- AI 检核层的上下文窗口按 session 隔离，每轮独立分配。
 ## 4. 文件修改边界规则
 
 ### 4.1 可修改的文件（核心业务代码）
@@ -393,3 +446,5 @@ Agent 在提交任何代码前，必须逐项确认：
   [ ] mvn clean test 全部通过
   [ ] mvn verify 覆盖率达标
   [ ] 无回归（现有测试未被修改来凑通过率）
+
+
