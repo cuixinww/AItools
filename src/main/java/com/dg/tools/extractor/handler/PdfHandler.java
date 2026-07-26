@@ -19,19 +19,27 @@ import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.function.Consumer;
 
 /**
- * PDF 处理器（PdfHandler）。
+ * PDF 处理器（.pdf）。
  *
- * 基于 Apache PDFBox 解析 PDF 文档：
- *   - 文本：使用自定义 PDFTextStripper 按 Y 坐标收集文本位置，
- *          将图像与其附近的文本按 Y 坐标混合排序；
- *   - 图片：遍历每页 PDResources 中的 XObject，记录其 Y 坐标，
- *          与文本跨度合并后生成有序的 Element 序列。
+ * 基于 Apache PDFBox 解析 PDF 文档，核心特性：
+ * <ul>
+ *   <li>图文混排排序：使用自定义 YCoordinateStripper 按 Y 坐标收集文本位置，
+ *          与图片的 Y 坐标混合排序，保持图文相对顺序</li>
+ *   <li>图片提取：遍历每页 PDResources 中的 XObject，记录文件名、字节和格式</li>
+ *   <li>JPEG 优化：JPEG 图片直接使用原始字节流（无需重新编码），其余格式转 PNG</li>
+ * </ul>
  *
- * 对应 SPEC §9 路由表：.pdf → PdfHandler。
+ * <p><b>内存注意</b>：PDFBox 的 Loader.loadPDF() 需要 byte[] 输入，
+ * 因此 doUnpack 和 doExtract 都会一次性读取整个文件到内存。
+ * 这是 PDFBox API 的设计限制，暂无法改为流式处理。</p>
+ *
+ * @see StoreWriter#writeMedia
  */
 @Component
 @Slf4j
@@ -41,17 +49,22 @@ public class PdfHandler extends AbstractHandler {
         super();
     }
 
+    /** 判断当前文件名是否为 .pdf 扩展名。 */
     @Override
     public boolean supports(String fileName) {
         return fileName != null && fileName.toLowerCase().endsWith(".pdf");
     }
 
-    // ==================== 阶段 1：UNPACK（拆包） ====================
+    // ==================== 阶段 1：UNPACK（仅图片） ====================
 
+    /**
+     * Phase 1 拆包：仅提取所有页面的图片，不解析文本内容。
+     */
     @Override
     protected ExtractionResult doUnpack(InputStream is, String fileName) throws Exception {
         ExtractionResult unpacked = ExtractionResult.of("pdf", fileName);
         int pos = 0;
+        // PDFBox Loader 需要 byte[]，无法流式传入 InputStream
         byte[] data = is.readAllBytes();
 
         try (PDDocument doc = Loader.loadPDF(data)) {
@@ -67,29 +80,41 @@ public class PdfHandler extends AbstractHandler {
         return unpacked;
     }
 
-    // ==================== 阶段 2：EXTRACT（解析） ====================
+    // ==================== 阶段 2：EXTRACT（完整解析） ====================
 
+    /**
+     * Phase 2 完整解析：逐页面处理，每页内图文按 Y 坐标混合排序。
+     * <p>处理流程：
+     * <ol>
+     *   <li>用 YCoordinateStripper 收集全文文本跨度及 Y 坐标</li>
+     *   <li>逐页处理：收集本頁图片 → 合并文本跨度 → 按 Y 降序排列</li>
+     *   <li>顺序遍历 Span：图片直接提交；文本追加到 StringBuilder，遇到空行或图片时 flush 为 paragraph</li>
+     * </ol>
+     * <p>注意：PDFBox 的 Page#getResources().getXObjectNames() 返回的图片
+     * 不包含精确的渲染位置信息，Y 坐标 fallback 到 pageHeight * 0.9f。
+     */
     @Override
     protected ExtractionResult doExtract(InputStream is, String fileName) throws Exception {
         ExtractionResult result = ExtractionResult.of("pdf", fileName);
         int position = 0;
+        // PDFBox Loader 需要 byte[]，无法流式传入 InputStream
         byte[] data = is.readAllBytes();
 
         try (PDDocument doc = Loader.loadPDF(data)) {
-            // 用自定义 stripper 按 Y 坐标收集文本跨度
+            // 用自定义 stripper 按 Y 坐标收集全文本跨度
             YCoordinateStripper stripper = new YCoordinateStripper();
             stripper.setSortByPosition(true);
-            stripper.getText(doc); // 填充 textSpans
+            stripper.getText(doc); // 填充内部 pageSpans
 
-            // 按 Y 坐标从上到下处理 PDF 内容
+            // 逐页处理：按 Y 坐标从上到下合并图片和文本
             for (int pageIdx = 0; pageIdx < doc.getNumberOfPages(); pageIdx++) {
-                // 收集本页图片（带 Y 坐标）
+                // 收集本页图片（带 fallback Y 坐标）
                 List<ImageSpan> pageImages = collectPageImages(doc.getPage(pageIdx), pageIdx);
 
-                // 收集本页文本（带 Y 坐标）
+                // 收集本页文本（已带 Y 坐标）
                 List<TextSpan> pageText = stripper.getTextSpansForPage(pageIdx);
 
-                // 合并排序
+                // 合并所有跨度
                 List<Span> allSpans = new ArrayList<>();
                 for (ImageSpan img : pageImages) {
                     allSpans.add(new Span(img.y, true, img));
@@ -97,20 +122,19 @@ public class PdfHandler extends AbstractHandler {
                 for (TextSpan ts : pageText) {
                     allSpans.add(new Span(ts.y, false, ts));
                 }
-                // 按 Y 坐标降序排列（PDF 中 Y 越大越靠近页面顶部）
+                // 按 Y 坐标降序排列（PDF 坐标系中 Y 越大越靠近页面顶部）
                 allSpans.sort((a, b) -> Float.compare(b.y, a.y));
 
-                // 生成 Element
+                // 顺序遍历生成 Element
                 StringBuilder paraBuf = new StringBuilder();
                 for (Span span : allSpans) {
                     if (span.isImage) {
-                        // 先将缓冲的文本提交为段落
+                        // 图片 → 先 flush 缓冲文本，再提交图片
                         if (!paraBuf.isEmpty()) {
                             result.addElement(new Element(position++, "paragraph",
                                     paraBuf.toString().trim()));
                             paraBuf.setLength(0);
                         }
-                        // 提交图片
                         ImageSpan imgSpan = (ImageSpan) span.payload;
                         String imgName = imgSpan.fileName;
                         result.addImage(new ImageFile(imgName, position, imgSpan.bytes, imgSpan.format));
@@ -121,19 +145,20 @@ public class PdfHandler extends AbstractHandler {
                         // 文本跨度
                         TextSpan ts = (TextSpan) span.payload;
                         if (ts.text.isBlank()) {
-                            // 空行 → 段落分隔
+                            // 空行 → 段落分隔（flush 已有文本）
                             if (!paraBuf.isEmpty()) {
                                 result.addElement(new Element(position++, "paragraph",
                                         paraBuf.toString().trim()));
                                 paraBuf.setLength(0);
                             }
                         } else {
+                            // 非空文本 → 追加到缓冲区（前后文本间加空格）
                             if (!paraBuf.isEmpty()) paraBuf.append(' ');
                             paraBuf.append(ts.text.trim());
                         }
                     }
                 }
-                // 提交最后一段文本
+                // 提交最后一页末尾剩余的文本
                 if (!paraBuf.isEmpty()) {
                     result.addElement(new Element(position++, "paragraph",
                             paraBuf.toString().trim()));
@@ -150,6 +175,11 @@ public class PdfHandler extends AbstractHandler {
 
     // ==================== 图片收集 ====================
 
+    /**
+     * 收集指定页面的所有图片（从 PDResources 的 XObject 中查找）。
+     * Y 坐标 fallback 到 pageHeight * 0.9f（PDF XObject 不含位置信息，
+     * 精确位置需解析 ContentStream 指令，此处不做）。
+     */
     private List<ImageSpan> collectPageImages(PDPage page, int pageIdx) {
         List<ImageSpan> result = new ArrayList<>();
         try {
@@ -162,13 +192,11 @@ public class PdfHandler extends AbstractHandler {
                 ImageBytes ib = readImageBytes(img);
                 if (ib.bytes.length == 0) continue;
 
-                // PDF 图片默认 Y 坐标位于页面顶部（最大 Y 接近 pageHeight）。
-                // 此 fallback 位置无法精确反映图片在原 PDF 中的实际渲染位置，
-                // 因为 XObject 本身不含位置信息；位置信息分散在 ContentStream 的指令中。
+                // Y 坐标 fallback：PDF XObject 本身不含位置信息，
+                // 精确位置需解析 ContentStream 的指令（Tm/CTM），暂不实现
                 float y = pageHeight * 0.9f;
                 String imgName = "pdf_image_" + pageIdx + "_" + result.size() + "." + ib.format;
-                ImageSpan is = new ImageSpan(imgName, ib.bytes, ib.format, y);
-                result.add(is);
+                result.add(new ImageSpan(imgName, ib.bytes, ib.format, y));
             }
         } catch (Exception e) {
             log.debug("Failed to collect page images: {}", e.getMessage());
@@ -176,8 +204,10 @@ public class PdfHandler extends AbstractHandler {
         return result;
     }
 
-    // ==================== 共享的图片抽取（Phase 1 unpack 用） ====================
-
+    /**
+     * 共享的图片抽取方法，供 Phase 1 unpack 使用。
+     * 通过 Consumer 回调交付结果，避免重复代码。
+     */
     private int extractImagesFromPage(PDResources resources, int startPos,
                                        Consumer<ImageFile> imageConsumer, Consumer<String> errorConsumer) {
         if (resources == null) return 0;
@@ -198,21 +228,27 @@ public class PdfHandler extends AbstractHandler {
         return pos - startPos;
     }
 
-    // ==================== 图片解码 ====================
-
+    /**
+     * 读取 PDImageXObject 的字节数据。
+     * JPEG 图片直接使用原始流（避免 JPEG-in-PNG 再编码导致的画质损失）。
+     * 其余格式先解码为 BufferedImage 再转 PNG。
+     */
     private static ImageBytes readImageBytes(PDImageXObject img) {
         try {
             String suffix = img.getSuffix();
+            // JPEG 图片：直接使用原始流，无需重新编码
             if ("jpg".equalsIgnoreCase(suffix) || "jpeg".equalsIgnoreCase(suffix)) {
                 try (InputStream raw = img.getCOSObject().createRawInputStream()) {
                     return new ImageBytes(raw.readAllBytes(), "jpg");
                 }
             }
+            // 其余格式：先解码为 BufferedImage，统一转为 PNG
             BufferedImage bi = img.getImage();
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             ImageIO.write(bi, "png", baos);
             return new ImageBytes(baos.toByteArray(), "png");
         } catch (Exception e) {
+            // 最终回退：尝试读取原始流
             try (InputStream raw = img.getCOSObject().createRawInputStream()) {
                 String fmt = img.getSuffix();
                 return new ImageBytes(raw.readAllBytes(), fmt != null ? fmt : "png");
@@ -223,11 +259,9 @@ public class PdfHandler extends AbstractHandler {
         }
     }
 
-    // ==================== Y 坐标文本提取器 ====================
+    // ==================== 内部类型 ====================
 
-    /**
-     * 自定义 PDFTextStripper，收集每页文本跨度及对应的 Y 坐标。
-     */
+    /** 文本跨度包装器：自定义 PDFTextStripper，按页收集文本及其 Y 坐标。 */
     private static class YCoordinateStripper extends PDFTextStripper {
         // pageIdx → list of TextSpan
         private final List<List<TextSpan>> pageSpans = new ArrayList<>();
@@ -238,6 +272,7 @@ public class PdfHandler extends AbstractHandler {
             super();
         }
 
+        /** 每个新页面开始时初始化对应的 TextSpan 列表。 */
         @Override
         protected void startPage(PDPage page) throws java.io.IOException {
             super.startPage(page);
@@ -248,37 +283,38 @@ public class PdfHandler extends AbstractHandler {
             currentSpans = pageSpans.get(currentPage);
         }
 
+        /** PDFBox 回调：每次写入一段文本时调用。记录首 TextPosition 的 Y 坐标作为跨度坐标。 */
         @Override
         protected void writeString(String text, List<TextPosition> textPositions) {
             if (textPositions.isEmpty()) return;
+            // 取第一个字符的 Y 坐标代表整段文本的位置
             TextPosition first = textPositions.get(0);
             float y = first.getYDirAdj();
-            TextSpan span = new TextSpan(text, y);
-            currentSpans.add(span);
+            currentSpans.add(new TextSpan(text, y));
         }
 
+        /** 按页索引获取文本跨度列表。 */
         List<TextSpan> getTextSpansForPage(int pageIdx) {
             if (pageIdx < 0 || pageIdx >= pageSpans.size()) return Collections.emptyList();
             return pageSpans.get(pageIdx);
         }
     }
 
-    // ==================== 内部类型 ====================
-
+    /** 图片字节 + 格式的轻量包装。 */
     private static class ImageBytes {
         final byte[] bytes;
         final String format;
         ImageBytes(byte[] bytes, String format) { this.bytes = bytes; this.format = format; }
     }
 
-    /** 文本跨度。 */
+    /** 文本跨度：包含文本内容和 Y 坐标。 */
     private static class TextSpan {
         final String text;
         final float y;
         TextSpan(String text, float y) { this.text = text; this.y = y; }
     }
 
-    /** 图片跨度。 */
+    /** 图片跨度：包含文件名、字节、格式和 Y 坐标。 */
     private static class ImageSpan {
         final String fileName;
         final byte[] bytes;
@@ -289,7 +325,7 @@ public class PdfHandler extends AbstractHandler {
         }
     }
 
-    /** 统一的跨度包装（文本或图片）。 */
+    /** 统一的跨度包装：区分图片/文本，按 Y 坐标排序后合并。 */
     private static class Span {
         final float y;
         final boolean isImage;

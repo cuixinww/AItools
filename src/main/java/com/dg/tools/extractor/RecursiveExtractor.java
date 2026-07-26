@@ -17,37 +17,64 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * 递归提取器（RecursiveExtractor）— 三阶段提取架构的编排层。
+ * 递归提取器 — 三阶段提取架构的编排层。
  *
- * 与 SPEC §3-§6 中的架构一致：
- *   1) Phase 1 UNPACK：调用 handler.unpack() → 递归拆出嵌入文件/图片 → 写源文件 + media/
- *   2) Phase 1.5 TRIAGE+IMAGE：调用 TriageProcessor 过滤无关文档 → ImageDescriber 生成图片描述
- *   3) Phase 2 PARSE：handler.extract() → writeBody + writeChunks + writeLargeTables
- *   4) 写 manifest.json
+ * 完整流程：
+ * <ol>
+ *   <li><b>Phase 1 UNPACK</b>：调用 handler.unpack() → 递归拆出嵌入文件/图片 → 写源文件副本 + media/</li>
+ *   <li><b>Phase 1.5 TRIAGE+IMAGE</b>：调用 TriageProcessor 过滤无关文档 → ImageDescriber 生成图片描述 JSON</li>
+ *   <li><b>Phase 2 PARSE</b>：逐文件调用 handler.extract() → writeBody + writeHierarchicalChunks + writeLargeTables</li>
+ *   <li><b>写入 manifest.json</b></li>
+ * </ol>
  *
- * 三阶段均无内存递归：每次只处理一个文件，处理完释放引用后再处理下一个。
+ * <p>内存隔离保证：ProcessFile 使用 byte[] 而非 InputStream，
+ * 因为递归场景下无法对 InputStream 做 seek 操作。
+ * 但通过 DocEntry.release() 在 Phase 2 完成后释放引用，
+ * 确保每次只在一个线程中持有一个文件的字节数组。</p>
  *
- * 对应 SPEC §4 / AGENTS.md §2.3 内存安全原则。
+ * @see RecursiveExtractor.Session
+ * @see RecursiveExtractor.DocEntry
  */
 @Service
 @Slf4j
 public class RecursiveExtractor {
 
+    /** Handler 路由表，由 Spring 自动注入所有 @Component Handler。 */
     private final List<AbstractHandler> handlers;
+
+    /** 产物写出器（body.md / chunks/ / data/ / media/）。 */
     private final StoreWriter storeWriter;
+
+    /** 类型探测器（Tika-based MIME 识别）。 */
     private final TypeDetector typeDetector;
+
+    /** TRIAGE 处理器：判定嵌入文档是否相关（可注入 LLM 实现）。 */
     private final TriageProcessor triageProcessor;
+
+    /** IMAGE 处理器：生成图片视觉描述 JSON（可注入视觉模型实现）。 */
     private final ImageDescriber imageDescriber;
+
+    /** 最大递归深度。默认 10 层。 */
     private final int maxDepth;
+
+    /** 单文件最大字节数。默认 209,715,200 (200 MB)。 */
     private final long maxFileSize;
+
+    /** 输出根目录路径。 */
     private final Path outputBase;
 
+    /**
+     * 通过 Spring 配置初始化 RecursiveExtractor。
+     * triageProcessor 和 imageDescriber 由 Spring Bean 注入，
+     * 若项目中未注册则回退为 NoOp 默认实现。
+     */
     @Autowired
     public RecursiveExtractor(
             List<AbstractHandler> handlers,
@@ -69,21 +96,29 @@ public class RecursiveExtractor {
     }
 
     /**
-     * 处理根文档（入口方法）。
-     * 完成 Phase 1 递归拆包 → Phase 2 逐文件解析 → 写入 manifest.json。
+     * 处理根文档的入口方法。
+     * <p>执行流程：
+     * <ol>
+     *   <li>检查文件大小上限 → 创建 session 目录</li>
+     *   <li>Phase 1：递归 unpack → 写入源文件 + media/ + 嵌入文件列表</li>
+     *   <li>Phase 2：逐条目 parse → 写入 body.md + chunks/ + data/</li>
+     *   <li>写入 manifest.json</li>
+     * </ol>
      *
-     * @param rawBytes   根文档的原始字节
-     * @param fileName   根文档的文件名
-     * @param sessionId  提取会话 ID（用于输出目录命名，如未提供则自动生成）
+     * @param rawBytes  根文档的原始字节
+     * @param fileName  根文档的文件名
+     * @param sessionId 提取会话 ID（用于输出目录命名）
      * @return 输出目录路径
      */
     public Path processRoot(byte[] rawBytes, String fileName, String sessionId) throws IOException {
+        // 根文档大小校验
         if (rawBytes.length > maxFileSize) {
             throw new IOException("File too large: " + fileName
                     + " (" + (rawBytes.length / (1024 * 1024)) + " MB), max is "
                     + (maxFileSize / (1024 * 1024)) + " MB");
         }
 
+        // 创建 session 输出目录
         Path sessionDir = outputBase.resolve(sessionId);
         Files.createDirectories(sessionDir);
 
@@ -91,15 +126,15 @@ public class RecursiveExtractor {
         String baseName = fileNameToBaseName(fileName);
         String dirName = session.resolveDirName(baseName);
 
-        // Phase 1: 递归拆包
+        // Phase 1: 递归拆包（含 TRIAGE 过滤 + IMAGE 描述）
         processFile(rawBytes, fileName, session, 0, null, dirName);
 
-        // Phase 2: 对每个文档做完整解析
+        // Phase 2: 对每个待解析条目做完整内容解析
         for (DocEntry entry : session.pendingEntries) {
             parseEntry(entry, session);
         }
 
-        // 写 manifest.json
+        // 写 manifest.json（汇总所有 DocInfo）
         String manifestJson = StoreWriter.buildManifestJson(sessionId, fileName, session.docInfoList);
         Files.writeString(sessionDir.resolve("manifest.json"), manifestJson);
 
@@ -109,9 +144,20 @@ public class RecursiveExtractor {
 
     /**
      * Phase 1 UNPACK + Phase 1.5 TRIAGE+IMAGE：递归处理一个文件（含其嵌入子文件）。
+     * <p>处理流程：
+     * <ol>
+     *   <li>检查 depth 和文件大小上限 → 写源文件副本到 docDir</li>
+     *   <li>TypeDetector 识别真实类型 → 找到对应 Handler → unpack()</li>
+     *   <li>写 media/ 图片到 disk</li>
+     *   <li>TriageProcessor 判定相关性 → filtered 则跳过后续处理</li>
+     *   <li>ImageDescriber 生成图片描述 JSON</li>
+     *   <li>记录 DocInfo + DocEntry（待 Phase 2）</li>
+     *   <li>若非 filtered → 递归处理 unpack 返回的 EmbeddedFile</li>
+     * </ol>
      */
     private void processFile(byte[] rawBytes, String fileName, Session session,
                               int depth, String parentInfo, String dirName) throws IOException {
+        // 递归深度保护
         if (depth >= maxDepth) {
             log.warn("Max depth reached for: {}", fileName);
             return;
@@ -128,13 +174,19 @@ public class RecursiveExtractor {
         String detectedExt = typeDetector.detectExtension(rawBytes, fileName);
         String sanitizedDirName = StringUtils.sanitizeFileName(dirName);
 
+        // 创建文档专属输出目录
         Path docDir = session.sessionDir.resolve(sanitizedDirName);
         Files.createDirectories(docDir);
 
-        // 写源文件副本
-        storeWriter.writeSourceFile(docDir, rawBytes, fileName);
+        // 写源文件副本（200MB 以内的文件）
+        try {
+            storeWriter.writeSourceFile(docDir, rawBytes, fileName);
+        } catch (IOException e) {
+            log.warn("Failed to write source file {}: {}", fileName, e.getMessage());
+            // 不中断流程，继续尝试解析
+        }
 
-        // Phase 1 UNPACK
+        // Phase 1 UNPACK：使用文件名路由 Handler（因为 unpack 依赖扩展名判断）
         AbstractHandler handler = resolveHandlerByFileName(fileName);
         if (handler == null) {
             log.warn("No handler for: {} (detected as {})", fileName, detectedExt);
@@ -144,6 +196,7 @@ public class RecursiveExtractor {
             return;
         }
 
+        // 调用 Handler.unpack() — 捕获异常避免阻断整个流程
         ExtractionResult unpacked;
         try {
             unpacked = handler.unpack(new ByteArrayInputStream(rawBytes), fileName);
@@ -153,7 +206,7 @@ public class RecursiveExtractor {
             unpacked.addError("unpack: " + e.getMessage());
         }
 
-        // 写 media/ 图片
+        // 写 media/ 图片到磁盘
         try {
             storeWriter.writeMedia(docDir, unpacked);
         } catch (Exception e) {
@@ -161,13 +214,13 @@ public class RecursiveExtractor {
             unpacked.addError("media: " + e.getMessage());
         }
 
-        // Phase 1.5 TRIAGE：相关性快判
+        // ========== Phase 1.5 TRIAGE：相关性快判 ==========
         RelevanceAssessment triage = triageProcessor.assess(rawBytes, fileName);
         String status = triage.isRelevant() ? "pending" : "filtered";
         String filterReason = triage.isRelevant() ? null : triage.getReason();
         double filterConfidence = triage.isRelevant() ? 0 : triage.getConfidence();
 
-        // Phase 1.5 IMAGE：图片视觉描述（尝试）
+        // ========== Phase 1.5 IMAGE：图片视觉描述 ==========
         for (ImageFile img : unpacked.getImages()) {
             try {
                 ImageDescription desc = imageDescriber.describe(img.getData(), img.getFormat());
@@ -187,7 +240,7 @@ public class RecursiveExtractor {
             }
         }
 
-        // 记录 DocInfo
+        // 记录 DocInfo（进入待解析队列或标记为 filtered）
         int seq = session.nextSeq();
         StoreWriter.DocInfo docInfo;
         if ("filtered".equals(status)) {
@@ -201,11 +254,11 @@ public class RecursiveExtractor {
         }
         session.addDocInfo(docInfo);
 
-        // 记录待 Phase 2 解析的条目
+        // 记录待 Phase 2 解析的条目（尚未解析，等 Phase 1 全部完成再批量处理）
         session.pendingEntries.add(new DocEntry(
                 rawBytes, fileName, sanitizedDirName, detectedExt, parentInfo, seq));
 
-        // 递归处理嵌入文件
+        // 递归处理内嵌文件（若被 triage 过滤则跳过）
         if (!"filtered".equals(status)) {
             for (EmbeddedFile emb : unpacked.getEmbeddedFiles()) {
                 String childName = StringUtils.sanitizeFileName(emb.getFileName());
@@ -219,7 +272,8 @@ public class RecursiveExtractor {
 
     /**
      * Phase 2 PARSE：对单个已拆包的文档做完整内容解析并写入产物。
-     * 解析完成后立即释放 rawBytes 引用，允许 GC 回收。
+     * <p>处理流程：resolveHandler → extract() → writeBody → writeChunks → writeLargeTables
+     * <p>解析完成后在 finally 块中释放 rawBytes 引用，允许 GC 回收。
      */
     private void parseEntry(DocEntry entry, Session session) {
         Path docDir = session.sessionDir.resolve(StringUtils.sanitizeFileName(entry.dirName));
@@ -231,6 +285,7 @@ public class RecursiveExtractor {
                 return;
             }
 
+            // 执行 Phase 2 完整解析
             ExtractionResult parsed = handler.extract(
                     new ByteArrayInputStream(entry.rawBytes), entry.fileName);
 
@@ -245,7 +300,7 @@ public class RecursiveExtractor {
             // 写 data/*.csv + CSV 切片
             storeWriter.writeLargeTables(docDir, parsed);
 
-            // 更新 DocInfo 统计
+            // 更新 DocInfo 统计（elementCount/dataRefCount/imageCount/status="done"）
             session.updateDocInfo(entry.seq, parsed.getElements().size(),
                     parsed.getLargeTables().size(), parsed.getImages().size());
 
@@ -253,13 +308,16 @@ public class RecursiveExtractor {
             log.error("Phase 2 parse failed for: {}", entry.fileName, e);
             session.updateDocInfoStatus(entry.seq, "error");
         } finally {
-            // 释放 rawBytes 引用，允许 GC 回收
+            // 释放 rawBytes 引用，允许 GC 回收该文件的字节数据
             entry.release();
         }
     }
 
     // ==================== 路由 ====================
 
+    /**
+     * 根据文件名从 handlers 列表中查找匹配的 Handler。
+     */
     private AbstractHandler resolveHandlerByFileName(String fileName) {
         if (fileName == null || handlers == null) return null;
         for (AbstractHandler h : handlers) {
@@ -270,12 +328,20 @@ public class RecursiveExtractor {
 
     // ==================== 工具方法 ====================
 
+    /**
+     * 从文件名中去除扩展名得到基本名称。
+     * 例如 "report.docx" → "report"；"no-ext" → "no-ext"。
+     */
     static String fileNameToBaseName(String fileName) {
         if (fileName == null || fileName.isEmpty()) return "unnamed";
         int dot = fileName.lastIndexOf('.');
         return dot > 0 ? fileName.substring(0, dot) : fileName;
     }
 
+    /**
+     * JSON 字符串转义：将特殊字符转换为对应的转义序列，
+     * 用于构建内联 JSON（如图片描述文件）。
+     */
     private static String escapeJson(String s) {
         if (s == null) return "";
         StringBuilder sb = new StringBuilder(s.length() + 8);
@@ -302,13 +368,24 @@ public class RecursiveExtractor {
 
     // ==================== 内部类型 ====================
 
-    /** 提取会话状态。 */
+    /**
+     * 提取会话状态。
+     * 封装一个 session 内的所有元数据和中间状态，
+     * 包括 docInfoList（清单条目）、pendingEntries（Phase 2 待解析队列）、
+     * dirRegistry（目录名去重计数）。
+     */
     static class Session {
+        /** 会话 ID。 */
         final String sessionId;
+        /** 会话输出根目录。 */
         final Path sessionDir;
+        /** 全局递增序列号计数器（每个 DocEntry/DocInfo 分配唯一 seq）。 */
         final AtomicInteger counter = new AtomicInteger(0);
+        /** 目录名注册表：sanitizedName → 出现次数（用于生成 _2, _3 后缀）。 */
         final Map<String, Integer> dirRegistry = new LinkedHashMap<>();
+        /** 所有文档的 DocInfo 列表（用于 manifest.json）。 */
         final List<StoreWriter.DocInfo> docInfoList = new ArrayList<>();
+        /** Phase 1 完成后待 Phase 2 解析的条目队列。 */
         final List<DocEntry> pendingEntries = new ArrayList<>();
 
         Session(String sessionId, Path sessionDir) {
@@ -316,8 +393,12 @@ public class RecursiveExtractor {
             this.sessionDir = sessionDir;
         }
 
+        /** 获取下一个全局序列号。 */
         int nextSeq() { return counter.getAndIncrement(); }
 
+        /**
+         * 解析目录名：同名的第二个实例自动加 _2，第三个加 _3，以此类推。
+         */
         String resolveDirName(String baseName) {
             String sanitized = StringUtils.sanitizeFileName(baseName);
             int count = dirRegistry.getOrDefault(sanitized, 0);
@@ -326,8 +407,12 @@ public class RecursiveExtractor {
             return sanitized + "_" + (count + 1);
         }
 
+        /** 添加一个文档元信息到清单列表。 */
         void addDocInfo(StoreWriter.DocInfo info) { docInfoList.add(info); }
 
+        /**
+         * Phase 2 完成后更新 DocInfo：回填 elementCount / dataRefCount / imageCount，标记 status="done"。
+         */
         void updateDocInfo(int seq, int elementCount, int dataRefCount, int imageCount) {
             for (StoreWriter.DocInfo d : docInfoList) {
                 if (d.seq == seq) {
@@ -340,6 +425,7 @@ public class RecursiveExtractor {
             }
         }
 
+        /** 更新指定 seq 的 DocInfo 状态（通常为 "error"）。 */
         void updateDocInfoStatus(int seq, String status) {
             for (StoreWriter.DocInfo d : docInfoList) {
                 if (d.seq == seq) {
@@ -350,13 +436,22 @@ public class RecursiveExtractor {
         }
     }
 
-    /** Phase 2 待解析条目。rawBytes 在 Phase 2 完成后通过 release() 释放。 */
+    /**
+     * Phase 2 待解析条目。
+     * rawBytes 在 Phase 2 完成后通过 release() 释放，允许 GC 回收。
+     */
     static class DocEntry {
+        /** 文档原始字节数据，Phase 2 完成后设为 null 以释放内存。 */
         byte[] rawBytes;
+        /** 文件名（已清洗过的）。 */
         final String fileName;
+        /** 文档输出目录名。 */
         final String dirName;
+        /** 检测到的文件类型。 */
         final String fileType;
+        /** 父级引用描述，如 "dirName, pos=3"。 */
         final String parentInfo;
+        /** 会话内全局唯一序列号。 */
         final int seq;
 
         DocEntry(byte[] rawBytes, String fileName, String dirName,

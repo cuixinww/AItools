@@ -12,25 +12,30 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * OLE2 二进制容器提取器（OleExtractor）。
+ * OLE2 二进制容器提取器。
  *
- * 用途：从 Office 文档（.doc / .xls / .ppt，即 OLE2 复合文档）以及
+ * 从 Office 文档（.doc / .xls / .ppt，即 OLE2 复合文档）以及
  * 其内嵌的 OLE 对象中，提取出真实的用户文件（如嵌入的 Word/Excel 文档、附件等）。
+ * <p>解析策略：
+ * <ol>
+ *   <li>优先尝试把内部流当作 Ole10Native 结构解析 —— Office 内嵌对象最常用的封装格式</li>
+ *   <li>若找不到任何 Ole10Native 条目，把所有「非内部保留」的文档流整体作为原始二进制返回</li>
+ *   <li>若输入根本不是合法 OLE2 容器，尝试把整段字节当作裸 Ole10Native 来解析</li>
+ * </ol>
  *
- * 两种解析策略：
- *   1) 优先尝试把内部流当作 Ole10Native 结构解析 —— 这是 Office 内嵌对象最常用的封装格式，
- *      其中包含原始文件名与原始文件内容；
- *   2) 若找不到任何 Ole10Native 条目，则把所有「非内部保留」的文档流整体作为原始二进制返回。
- *
- * 此外，当输入本身根本不是合法 OLE2 容器时，会尝试把整段字节当作裸 Ole10Native 来解析。
+ * @see DocxHandler#unpackOleEmbeddings
+ * @see OleExtractor
  */
 @Slf4j
 public class OleExtractor {
 
-    /** 递归展开的最大深度，防止 OLE 目录树过深。 */
+    /** 递归展开的最大深度，防止 OLE 目录树过深导致栈溢出。 */
     private static final int MAX_DEPTH = 10;
 
-    /** OLE2 内部保留流名称集合 —— 这些是复合文档的账本 / 索引流，不是用户文件，应跳过。 */
+    /**
+     * OLE2 内部保留流名称集合。
+     * 这些是复合文档的账本/索引流，不是用户文件，应跳过。
+     */
     private static final Set<String> INTERNAL_STREAMS = Set.of(
             "WordDocument", "1Table", "0Table", "Data",
             "ObjectPool", "CompObj", "ObjInfo"
@@ -41,9 +46,10 @@ public class OleExtractor {
 
     /**
      * 从一段 OLE 数据中提取全部内嵌文件。
+     * <p>入口方法：先尝试正常 OLE2 容器解析 → 失败后回退到裸 Ole10Native 解析 → 仍失败返回空 Map。
      *
      * @param oleData OLE 容器或 Ole10Native 的原始字节
-     * @return 映射表：key 为文件名（OLE 路径前缀 + 原始文件名，避免同名冲突），value 为文件内容
+     * @return 映射表：key 为文件名（含 OLE 路径前缀以防同名冲突），value 为文件内容
      */
     public static Map<String, byte[]> extract(byte[] oleData) {
         if (oleData == null || oleData.length == 0) {
@@ -52,6 +58,7 @@ public class OleExtractor {
         try {
             return doExtract(oleData);
         } catch (Exception e) {
+            // OLE2 容器解析失败 → 回退到裸 Ole10Native 解析
             log.warn("OLE extraction failed, trying raw Ole10Native fallback", e);
             Map<String, byte[]> raw = tryRawOle10Native(oleData);
             if (!raw.isEmpty()) return raw;
@@ -96,6 +103,11 @@ public class OleExtractor {
     /**
      * 递归遍历 OLE 目录树，定位并解析每个 Ole10Native 条目。
      * 同名的文件来自不同内嵌对象时，用 OLE 路径前缀做 key 以避免冲突。
+     *
+     * @param dir    当前目录节点
+     * @param path   OLE 路径前缀（用于 key 消歧）
+     * @param result 结果累加器
+     * @param depth  当前递归深度
      */
     private static void extractOle10Entries(DirectoryNode dir, String path, Map<String, byte[]> result, int depth) throws IOException {
         if (depth >= MAX_DEPTH) return;
@@ -145,7 +157,10 @@ public class OleExtractor {
         }
     }
 
-    /** 过滤掉 OLE2 内部账本流（不是用户文件）。 */
+    /**
+     * 判断给定的流名称是否为 OLE2 内部保留流。
+     * 包括：INTERNAL_STREAMS 集合中的已知名称，以及以控制字符（0x01-0x05）开头的属性流。
+     */
     private static boolean isInternalStream(String name) {
         if (name == null || name.isEmpty()) return true;
         // OLE2 属性流名称以控制字符（0x01-0x05）开头
@@ -155,8 +170,7 @@ public class OleExtractor {
 
     /**
      * 从 Ole10Native 字节流中解析原始文件名。
-     * 格式：4 字节长度 + 文件名（以 NUL 结尾）+ 文件内容。
-     * 这里跳过开头 4 字节长度字段，扫描到第一个 NUL 作为文件名结束。
+     * 跳过开头 4 字节长度字段，扫描到第一个 NUL 作为文件名结束。
      */
     private static String tryExtractOle10NativeName(byte[] data) {
         if (data == null || data.length < 4) return null;
@@ -177,16 +191,17 @@ public class OleExtractor {
 
     /**
      * 从 Ole10Native 字节流中解析文件内容。
-     *
-     * Ole10Native 真实格式（[MS-OLEDS] §2.3.3）：
+     * <p>Ole10Native 真实格式（[MS-OLEDS] §2.3.3）：
+     * <pre>
      *   nativeSize(4LE) + fileName(NUL) + srcPath(NUL) + tmpPath(NUL)
      *   + nativeDataSize(4LE) + content
-     *
-     * 但部分简化场景只有：nativeSize(4LE) + fileName(NUL) + content。
-     *
-     * 解析策略：
-     *   1) 优先按完整格式解析（跳过 srcPath + tmpPath，读取 nativeDataSize，切出 content）；
-     *   2) 若完整格式失败，回退到简化格式（NUL 后的 4 字节长度探测 / 全部剩余字节）。
+     * </pre>
+     * 部分简化场景只有：nativeSize(4LE) + fileName(NUL) + content。
+     * <p>解析策略：
+     * <ol>
+     *   <li>策略 1：按完整格式解析（跳过 srcPath + tmpPath，读取 nativeDataSize，切出 content）</li>
+     *   <li>策略 2：简化格式回退（NUL 后的 4 字节长度探测 / 全部剩余字节）</li>
+     * </ol>
      */
     private static byte[] tryExtractOle10NativeContent(byte[] data) {
         if (data == null || data.length < 4) return null;
@@ -208,7 +223,7 @@ public class OleExtractor {
 
     /**
      * 按完整 Ole10Native 格式解析：
-     *   fileName + NUL + srcPath + NUL + tmpPath + NUL + nativeDataSize(4LE) + content
+     *   fileName + NUL + srcPath(NUL) + tmpPath(NUL) + nativeDataSize(4LE) + content
      */
     private static byte[] tryExtractFullFormat(byte[] data, int nameEnd) {
         // 跳过 srcPath（到下一个 NUL）
@@ -256,7 +271,7 @@ public class OleExtractor {
                 return result;
             }
         }
-        // 没有合法长度前缀 —— 取 NUL 之后的全部内容
+        // 没有合法长度前缀 — 取 NUL 之后的全部内容
         if (contentStart < data.length) {
             byte[] result = new byte[data.length - contentStart];
             System.arraycopy(data, contentStart, result, 0, result.length);

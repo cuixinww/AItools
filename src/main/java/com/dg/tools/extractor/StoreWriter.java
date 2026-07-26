@@ -11,20 +11,29 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
- * 结构化产物写出器（StoreWriter）。
+ * 结构化产物写出器。
  *
  * 负责把解析结果 {@link ExtractionResult} 落盘为以下产物：
- *   - body.md        ：正文 Markdown（含 # POS / TYPE 头、大表 data_ref、图片引用）
- *   - chunks/        ：标题感知分块 + index.json（供 LLM 按需加载）
- *   - data/          ：大表的完整 CSV + 必要时切片（>500 行时）
- *   - media/         ：图片原始文件
- *   - 源文件         ：原始二进制副本（在 RecursiveExtractor 阶段 1 写出）
- *   - manifest.json  ：会话级清单（由 buildManifestJson 生成）
+ * <ul>
+ *   <li>body.md — 正文 Markdown（含 # POS / TYPE 头、大表 data_ref、图片引用）</li>
+ *   <li>chunks/ — 标题感知分块 + index.json（供 LLM 按需加载）</li>
+ *   <li>data/   — 大表的完整 CSV + 必要时切片（&gt;500 行时）</li>
+ *   <li>media/  — 图片原始文件</li>
+ *   <li>源文件  — 原始二进制副本（在 RecursiveExtractor 阶段 1 写出）</li>
+ *   <li>manifest.json — 会话级清单（由 buildManifestJson 生成）</li>
+ * </ul>
  *
- * 该工具类无状态（除静态常量与共享 ObjectMapper 外），可安全复用。
+ * <p>无状态工具类（除静态常量与共享 ObjectMapper 外），可安全复用。</p>
+ *
+ * @see StoreWriter.DocInfo
+ * @see CsvSlicer
  */
 @Slf4j
 public class StoreWriter {
@@ -32,7 +41,7 @@ public class StoreWriter {
     /** 单个 chunk 包含的元素数量（默认 50，仅用于回退分块）。 */
     private static final int CHUNK_SIZE = 50;
 
-    /** Jackson 的 JSON 序列化器（线程安全，可复用）。 */
+    /** Jackson JSON 序列化器（线程安全，可复用）。 */
     private static final ObjectMapper JSON = new ObjectMapper();
 
     /** 源文件副本写入磁盘的大小上限（200 MB）。 */
@@ -40,6 +49,7 @@ public class StoreWriter {
 
     /**
      * 写出正文 body.md。
+     * 格式：每行以 "# POS: N | TYPE: xxx | metadata" 开头，后跟元素正文内容。
      */
     public void writeBody(Path docDir, String mdFileName, ExtractionResult result,
                           int seq, String sourceFile, String parentInfo) throws IOException {
@@ -47,6 +57,7 @@ public class StoreWriter {
         Path bodyFile = docDir.resolve(mdFileName);
 
         try (BufferedWriter bw = Files.newBufferedWriter(bodyFile, StandardCharsets.UTF_8)) {
+            // 文档头部元信息
             bw.write("# DOC: " + seq); bw.newLine();
             bw.write("# SOURCE: " + sourceFile); bw.newLine();
             if (parentInfo != null) {
@@ -54,15 +65,18 @@ public class StoreWriter {
             }
             bw.newLine();
 
+            // 写出所有正文元素（paragraph / table / header / footer 等）
             for (Element elem : result.getElements()) {
                 writeElement(bw, elem);
             }
 
+            // 写出大表 data_ref 引用（含 schema、行数预览）
             for (LargeTableInfo lt : result.getLargeTables()) {
                 bw.write("# POS: " + lt.getPosition() + " | TYPE: data_ref | " +
                         "schema: " + lt.getSchema() + " | rows: " + lt.getRowCount() +
                          " | file: data/" + StringUtils.sanitizeFileName(lt.getSheetName()) + ".csv");
                 bw.newLine();
+                // 输出 preview 文本（以 "> " 前缀的行内注释）
                 if (lt.getPreview() != null && !lt.getPreview().isEmpty()) {
                     for (String line : lt.getPreview().split("\\r?\\n")) {
                         bw.write("> " + line);
@@ -72,6 +86,7 @@ public class StoreWriter {
                 bw.newLine();
             }
 
+            // 写出图片引用
             for (ImageFile img : result.getImages()) {
                 bw.write("# POS: " + img.getPosition() + " | TYPE: image | " +
                         "file: media/" + StringUtils.sanitizeFileName(img.getFileName()));
@@ -97,6 +112,7 @@ public class StoreWriter {
         int totalChunks = (totalElements + CHUNK_SIZE - 1) / CHUNK_SIZE;
         if (totalChunks == 0) totalChunks = 1;
 
+        // 构建 index.json 内容
         Map<String, Object> index = new LinkedHashMap<>();
         index.put("source", docDirName + "/" + mdFileName);
         index.put("total_elements", totalElements);
@@ -121,6 +137,7 @@ public class StoreWriter {
         }
         index.put("chunks", chunks);
 
+        // 列出各 chunk 中包含的大表
         List<Map<String, Object>> largeTables = new ArrayList<>();
         for (LargeTableInfo lt : result.getLargeTables()) {
             String csvFile = StringUtils.sanitizeFileName(lt.getSheetName()) + ".csv";
@@ -140,6 +157,7 @@ public class StoreWriter {
                 JSON.writerWithDefaultPrettyPrinter().writeValueAsString(index),
                 StandardCharsets.UTF_8);
 
+        // 逐 chunk 写出
         List<Element> elements = result.getElements();
         for (int i = 0; i < totalChunks; i++) {
             int start = i * CHUNK_SIZE;
@@ -160,11 +178,12 @@ public class StoreWriter {
 
     /**
      * 标题感知分块（新 API）。
-     *
-     * 分块策略：
-     *   1) 总元素数 ≤ 阈值(300) → 不分块；
-     *   2) 有标题 → 先按 H1 切，子节过长再按 H2/H3 细切；
-     *   3) 无标题 → 回退到固定 CHUNK_SIZE 机械分块。
+     * <p>分块策略：
+     * <ol>
+     *   <li>总元素数 ≤ 300 → 不分块，直接写 index.json 并返回</li>
+     *   <li>有标题 → 按 H1 切分为大节，子节超过 200 元素再按 H2/H3 细切</li>
+     *   <li>无标题 → 回退到固定 {@link #CHUNK_SIZE} 机械分块</li>
+     * </ol>
      */
     public void writeHierarchicalChunks(Path docDir, String docDirName, String mdFileName,
                                          ExtractionResult result) throws IOException {
@@ -177,6 +196,7 @@ public class StoreWriter {
 
         List<Element> elements = result.getElements();
 
+        // 小文档不分块（≤300 元素直接一个 index.json 完事）
         if (totalElements <= 300) {
             Map<String, Object> index = new LinkedHashMap<>();
             index.put("source", docDirName + "/" + mdFileName);
@@ -191,7 +211,9 @@ public class StoreWriter {
             return;
         }
 
+        // 计算分块边界（标题感知）
         List<ChunkBoundary> boundaries = computeHierarchicalChunks(elements);
+        // 若没有发现标题 → 回退到固定分块
         int totalChunks = boundaries.size();
         if (totalChunks == 0) {
             totalChunks = (totalElements + CHUNK_SIZE - 1) / CHUNK_SIZE;
@@ -203,6 +225,7 @@ public class StoreWriter {
             }
         }
 
+        // 构建 index.json
         Map<String, Object> index = new LinkedHashMap<>();
         index.put("source", docDirName + "/" + mdFileName);
         index.put("total_elements", totalElements);
@@ -224,12 +247,14 @@ public class StoreWriter {
                 chunk.put("heading_level", b.headingLevel);
                 chunk.put("heading_text", b.headingText);
             }
+            // 估算 token 数（供 AI 上下文预算参考）
             chunk.put("approximate_tokens", estimateTokens(elements, b.start, b.end));
             chunk.put("includes_large_table", hasLargeTable);
             chunkList.add(chunk);
         }
         index.put("chunks", chunkList);
 
+        // 列出每个大表所在的 chunk
         List<Map<String, Object>> largeTables = new ArrayList<>();
         for (LargeTableInfo lt : result.getLargeTables()) {
             String csvFile = StringUtils.sanitizeFileName(lt.getSheetName()) + ".csv";
@@ -251,6 +276,7 @@ public class StoreWriter {
                 JSON.writerWithDefaultPrettyPrinter().writeValueAsString(index),
                 StandardCharsets.UTF_8);
 
+        // 逐 chunk 写出文件
         for (int i = 0; i < boundaries.size(); i++) {
             ChunkBoundary b = boundaries.get(i);
             String chunkFile = String.format("chunk_%04d.md", i + 1);
@@ -270,10 +296,20 @@ public class StoreWriter {
         }
     }
 
+    /**
+     * 计算标题感知的分块边界。
+     * <p>算法：
+     * <ol>
+     *   <li>收集所有 headingLevel 1-3 的元素位置</li>
+     *   <li>相邻标题之间为一节（H1 粒度）</li>
+     *   <li>单节超过 200 元素且存在子标题（hLevel > current）→ 按子标题细切</li>
+     * </ol>
+     */
     static List<ChunkBoundary> computeHierarchicalChunks(List<Element> elements) {
         List<ChunkBoundary> result = new ArrayList<>();
         if (elements.isEmpty()) return result;
 
+        // 第一遍：收集所有 H1-H3 标题的位置
         List<Integer> headingPositions = new ArrayList<>();
         for (int i = 0; i < elements.size(); i++) {
             Element e = elements.get(i);
@@ -281,8 +317,10 @@ public class StoreWriter {
                 headingPositions.add(i);
             }
         }
+        // 没有任何标题 → 返回空列表，上层会回退到固定分块
         if (headingPositions.isEmpty()) return result;
 
+        // 第二遍：按标题分组
         for (int hi = 0; hi < headingPositions.size(); hi++) {
             int start = headingPositions.get(hi);
             int end = (hi + 1 < headingPositions.size())
@@ -290,10 +328,13 @@ public class StoreWriter {
             Element headingElem = elements.get(start);
             int hLevel = headingElem.getHeadingLevel() != null ? headingElem.getHeadingLevel() : 0;
             String hText = headingElem.getContent() != null ? headingElem.getContent() : "";
+
+            // 单节超过 200 元素 → 检查是否有子标题可以进一步细切
             if ((end - start + 1) > 200) {
                 int subStart = start;
                 for (int j = start + 1; j <= end; j++) {
                     Element e = elements.get(j);
+                    // 找到级别更高的子标题且距上一分割点 > 50 元素时触发细切
                     if (e.getHeadingLevel() != null && e.getHeadingLevel() > hLevel
                             && e.getHeadingLevel() <= 3 && (j - subStart) > 50) {
                         result.add(new ChunkBoundary(subStart, j - 1, hLevel, hText));
@@ -303,6 +344,7 @@ public class StoreWriter {
                         hText = e.getContent() != null ? e.getContent() : "";
                     }
                 }
+                // 最后一段
                 result.add(new ChunkBoundary(subStart, end, hLevel, hText));
             } else {
                 result.add(new ChunkBoundary(start, end, hLevel, hText));
@@ -311,6 +353,7 @@ public class StoreWriter {
         return result;
     }
 
+    /** 查找 position 所属的 chunk 索引。线性扫描（chunks 数量通常不大）。 */
     private int findChunkIndex(List<ChunkBoundary> boundaries, int position) {
         for (int i = 0; i < boundaries.size(); i++) {
             if (position >= boundaries.get(i).start && position <= boundaries.get(i).end) return i;
@@ -318,6 +361,10 @@ public class StoreWriter {
         return -1;
     }
 
+    /**
+     * 估算指定范围内元素的 token 数。
+     * 经验公式：每 4 个 ASCII 字符 ≈ 1 token。
+     */
     private int estimateTokens(List<Element> elements, int start, int end) {
         int chars = 0;
         for (int i = start; i <= end && i < elements.size(); i++) {
@@ -328,7 +375,7 @@ public class StoreWriter {
         return Math.max(1, chars / 4);
     }
 
-    /** 分块边界。 */
+    /** 标题感知分块的边界。 */
     static class ChunkBoundary {
         final int start, end, headingLevel;
         final String headingText;
@@ -352,7 +399,8 @@ public class StoreWriter {
     }
 
     /**
-     * 写出图片原始文件。
+     * 写出图片原始文件到 media/ 目录。
+     * 跳过已存在的同名文件（避免重复写入）。
      */
     public void writeMedia(Path docDir, ExtractionResult result) throws IOException {
         if (result.getImages().isEmpty()) return;
@@ -367,7 +415,7 @@ public class StoreWriter {
 
     /**
      * 写出大表的完整 CSV + CSV 切片。
-     * 逐行写出后立即释放 allRows 引用，避免大表数据长期占用堆内存。
+     * 逐行写出后立即释放 allRows 引用（调用 clearRows()），避免大表数据长期占用堆内存。
      */
     public void writeLargeTables(Path docDir, ExtractionResult result) throws IOException {
         if (result.getLargeTables().isEmpty()) return;
@@ -377,12 +425,14 @@ public class StoreWriter {
             List<List<String>> rows = lt.getAllRows();
             if (rows.isEmpty()) continue;
             Path csvFile = dataDir.resolve(StringUtils.sanitizeFileName(lt.getSheetName()) + ".csv");
+            // 逐行写出 CSV
             try (BufferedWriter bw = Files.newBufferedWriter(csvFile, StandardCharsets.UTF_8)) {
                 for (List<String> row : rows) {
                     bw.write(StringUtils.toCsvLine(row));
                     bw.newLine();
                 }
             }
+            // 解析列名列表，传递给 CsvSlicer（用于 index.json columns 字段）
             List<String> columns = Arrays.asList(lt.getSchema().split(" \\| "));
             CsvSlicer.sliceIfNeeded(dataDir, lt.getSheetName(), rows, columns);
             // 写出后立即清除对 allRows 的引用，允许 GC 回收
@@ -391,7 +441,8 @@ public class StoreWriter {
     }
 
     /**
-     * 构建 manifest.json。
+     * 构建 manifest.json 字符串。
+     * 根节点包含 session_id、source_file 和 docs 列表。
      */
     public static String buildManifestJson(String sessionId, String sourceFile,
                                             List<DocInfo> docs) {
@@ -430,23 +481,39 @@ public class StoreWriter {
     }
 
     /**
-     * 文档元信息。
+     * 文档元信息，用于 manifest.json 中的 docs 列表。
      */
     public static class DocInfo {
+        /** 全局唯一序列号（会话内递增）。 */
         public final int seq;
+        /** 文档所在目录名（已清洗过特殊字符）。 */
         public final String dir;
+        /** 原始文件名。 */
         public final String source;
+        /** 源文件副本路径。 */
         public final String sourceCopy;
+        /** 文件类型标识。 */
         public final String type;
+        /** 解析后的元素数量（Phase 2 回填）。 */
         public int elementCount;
+        /** data_ref 数量。 */
         public int dataRefCount;
+        /** 提取的图片数量。 */
         public int imageCount;
+        /** 生成的 chunk 数量。 */
         public int chunkCount;
+        /** 父级引用描述，如 "dirName pos=3"。 */
         public final String parentInfo;
+        /** 状态："pending" / "done" / "filtered" / "error"。 */
         public String status;
+        /** filtered 原因。 */
         public String filterReason;
+        /** filtered 置信度。 */
         public double filterConfidence;
 
+        /**
+         * Phase 2 完成后的 DocInfo 构造函数（带统计计数）。
+         */
         public DocInfo(int seq, String dir, String source, String sourceCopy, String type,
                        int elementCount, int dataRefCount, int imageCount, int chunkCount, String parentInfo) {
             this.seq = seq; this.dir = dir; this.source = source; this.sourceCopy = sourceCopy;
@@ -455,6 +522,9 @@ public class StoreWriter {
             this.status = "done";
         }
 
+        /**
+         * Phase 1 或过滤状态下的 DocInfo 构造函数（不带统计计数）。
+         */
         public DocInfo(int seq, String dir, String source, String sourceCopy, String type,
                        String parentInfo, String status) {
             this.seq = seq; this.dir = dir; this.source = source; this.sourceCopy = sourceCopy;
@@ -463,11 +533,16 @@ public class StoreWriter {
         }
     }
 
+    /**
+     * 写出单个 Element 到 body.md。
+     * 格式：一行 "# POS: N | TYPE: xxx | metadata" + 内容 + 空行。
+     */
     private void writeElement(BufferedWriter bw, Element elem) throws IOException {
         StringBuilder header = new StringBuilder();
         header.append("# POS: ").append(elem.getPosition());
         header.append(" | TYPE: ").append(elem.getType());
         if (elem.getMetadata() != null && !elem.getMetadata().isEmpty()) {
+            // 将元信息中的连续空白替换为单个空格，保持格式整洁
             header.append(" | ").append(elem.getMetadata().replaceAll("\\s+", " "));
         }
         bw.write(header.toString()); bw.newLine();

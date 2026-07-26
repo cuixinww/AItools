@@ -1,0 +1,40 @@
+{
+  "session_id" : "test_run",
+  "source_file" : "SCM-NextGen_软件需求规格说明书_V2.3.1.docx",
+  "docs" : [ {
+    "seq" : 0,
+    "dir" : "SCM-NextGen_软件需求规格说明书_V2.3.1",
+    "source" : "SCM-NextGen_软件需求规格说明书_V2.3.1.docx",
+    "source_copy" : "SCM-NextGen_软件需求规格说明书_V2.3.1/SCM-NextGen_软件需求规格说明书_V2.3.1.docx",
+    "type" : "docx",
+    "element_count" : 223,
+    "data_ref_count" : 0,
+    "image_count" : 0,
+    "chunk_count" : 0,
+    "status" : "done"
+  }, {
+    "seq" : 1,
+    "dir" : "Microsoft_Word_Document",
+    "source" : "Microsoft_Word_Document.docx",
+    "source_copy" : "Microsoft_Word_Document/Microsoft_Word_Document.docx",
+    "type" : "docx",
+    "element_count" : 413,
+    "data_ref_count" : 0,
+    "image_count" : 0,
+    "chunk_count" : 0,
+    "parent" : "SCM-NextGen_软件需求规格说明书_V2.3.1, pos=0",
+    "status" : "done"
+  }, {
+    "seq" : 2,
+    "dir" : "Microsoft_Excel_Worksheet",
+    "source" : "Microsoft_Excel_Worksheet.xlsx",
+    "source_copy" : "Microsoft_Excel_Worksheet/Microsoft_Excel_Worksheet.xlsx",
+    "type" : "docx",
+    "element_count" : 8,
+    "data_ref_count" : 2,
+    "image_count" : 0,
+    "chunk_count" : 0,
+    "parent" : "Microsoft_Word_Document, pos=0",
+    "status" : "done"
+  } ]
+}

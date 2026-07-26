@@ -11,16 +11,29 @@ import org.apache.poi.hwpf.usermodel.*;
 import org.springframework.stereotype.Component;
 
 import java.io.InputStream;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.Arrays;
 
 /**
- * DOC 文档处理器（DocHandler）。
+ * DOC 文档处理器（.doc, Word 97-2003 OLE2 格式）。
  *
- * 基于 Apache POI (HWPF) 解析 Word 97-2003（.doc，OLE2 二进制格式）文档。
- * 完整实现段落（含标题/删除线）、表格（Markdown 渲染）、图片、OLE嵌入对象、
- * 页眉页脚提取，以及独立的 Phase 1 轻量 unpack。
+ * 基于 Apache POI (HWPF) 解析 .doc 文档，支持：
+ * <ul>
+ *   <li>Phase 1 UNPACK：仅提取图片（轻量级，不解析文本）</li>
+ *   <li>Phase 2 EXTRACT：完整解析段落、表格、页眉、图片</li>
+ *   <li>标题检测：从 StyleSheet 中解析 "Heading N" / "标题 N" 等样式名</li>
+ *   <li>删除线标记：CharacterRun 的 isStrikeThrough() 为 true 时包裹 ~~...~~</li>
+ *   <li>表格渲染：处理垂直合并单元格（isVerticallyMerged + isFirstMerged），输出 Markdown 表格</li>
+ * </ul>
  *
- * 对应 SPEC §9 路由表：.doc → DocHandler。
+ * <p>注意：DOC 本身是 OLE2 复合文档（POIFS），内嵌对象可通过 OleExtractor 解出。
+ * Phase 1 unpack 阶段暂不提取 OLE 嵌入文件，仅在 Phase 2 extract 中提取。</p>
+ *
+ * @see OleExtractor
+ * @see AbstractHandler
  */
 @Component
 @Slf4j
@@ -30,13 +43,19 @@ public class DocHandler extends AbstractHandler {
         super();
     }
 
+    /** 判断当前文件名是否为 .doc 扩展名。 */
     @Override
     public boolean supports(String fileName) {
         return fileName != null && fileName.toLowerCase().endsWith(".doc");
     }
 
-    // ==================== 阶段 1：UNPACK（仅图片 + 嵌入对象） ====================
+    // ==================== 阶段 1：UNPACK（仅图片） ====================
 
+    /**
+     * Phase 1 拆包：仅提取图片，不解析文本，实现轻量级操作。
+     * OLE 嵌入对象通过 Phase 2 完整处理；.doc 本身就是 OLE2 容器，
+     * 嵌入对象在 Phase 2 extractRangeContent 中可被 OleExtractor 解出。
+     */
     @Override
     protected ExtractionResult doUnpack(InputStream is, String fileName) throws Exception {
         ExtractionResult unpacked = ExtractionResult.of("doc", fileName);
@@ -45,8 +64,7 @@ public class DocHandler extends AbstractHandler {
         try (HWPFDocument doc = new HWPFDocument(is)) {
             // 仅提取图片（轻量级，不解析文本）
             position += unpackImages(doc, unpacked, position);
-            // OLE 嵌入对象通过 Phase 2 完整处理；Phase 1 仅需保留原始字节
-            // .doc 本身就是 OLE2 容器，嵌入对象可在 Phase 2 从 POIFS 中提取
+            // OLE 嵌入对象通过 Phase 2 完整处理
         } catch (Exception e) {
             log.error("Failed to unpack doc: {}", fileName, e);
             unpacked.addError("unpack error: " + e.getMessage());
@@ -55,6 +73,10 @@ public class DocHandler extends AbstractHandler {
         return unpacked;
     }
 
+    /**
+     * 从 PicturesTable 中提取所有图片。
+     * 返回实际提取到的图片数量（用于 position 自增）。
+     */
     private int unpackImages(HWPFDocument doc, ExtractionResult result, int position) {
         int count = 0;
         PicturesTable picturesTable = doc.getPicturesTable();
@@ -76,6 +98,10 @@ public class DocHandler extends AbstractHandler {
 
     // ==================== 阶段 2：EXTRACT（完整解析） ====================
 
+    /**
+     * Phase 2 完整解析：按顺序处理页眉 → 正文（段落+表格）→ 图片。
+     * 使用 StyleSheet 进行标题级别检测。
+     */
     @Override
     protected ExtractionResult doExtract(InputStream is, String fileName) throws Exception {
         ExtractionResult result = ExtractionResult.of("doc", fileName);
@@ -94,7 +120,7 @@ public class DocHandler extends AbstractHandler {
                 position = extractRangeContent(range, result, position, styleSheet);
             }
 
-            // 提取图片（生成 TYPE: image Element）
+            // 提取图片（生成 TYPE: image Element，含 media/ 引用）
             position = extractImages(doc, result, position);
 
         } catch (Exception e) {
@@ -107,10 +133,16 @@ public class DocHandler extends AbstractHandler {
 
     /**
      * 遍历 Range，交替处理表格和段落。
+     * <p>算法：
+     * <ol>
+     *   <li>预扫描所有 Table 列表并建立索引 tableIdx</li>
+     *   <li>对每个 Paragraph，若 isInTable() 则匹配对应 Table 渲染为 Markdown</li>
+     *   <li>渲染后跳过该表格内剩余的所有段落（while i++ 直到下一个不在表格中的段)</li>
+     * </ol>
      */
     private int extractRangeContent(Range range, ExtractionResult result,
                                       int position, StyleSheet styleSheet) {
-        // Build list of tables in this range
+        // 预扫描：收集 Range 内的所有表格并排序（HWPF 可能不按段落顺序给出表格）
         List<Table> tables = new ArrayList<>();
         TableIterator tableIter = new TableIterator(range);
         while (tableIter.hasNext()) {
@@ -122,7 +154,7 @@ public class DocHandler extends AbstractHandler {
             Paragraph para = range.getParagraph(i);
             if (para == null) continue;
             if (para.isInTable()) {
-                // 遇到表格 → 渲染整个表格为 Markdown 并跳过该表格的剩余段落
+                // 当前段落属于某个表格 → 用 TableIterator 中对应的 Table 渲染
                 if (tableIdx < tables.size()) {
                     Table table = tables.get(tableIdx);
                     if (table != null) {
@@ -131,11 +163,11 @@ public class DocHandler extends AbstractHandler {
                             result.addElement(new Element(position++, "table", md));
                         }
                         tableIdx++;
-                        // 跳过当前表格内剩余的段落
+                        // 跳过当前表格内剩余的段落（isInTable 为 true 的连续段落）
                         while (i + 1 < range.numParagraphs()) {
                             Paragraph next = range.getParagraph(i + 1);
+                            // 停止条件：下一段不属于表格，或超出当前 Table 范围
                             if (next == null || !next.isInTable()) break;
-                            // 如果下一个段落的偏移量超出了当前表格范围，则是另一个表格
                             if (tableIdx < tables.size()
                                     && next.getStartOffset() >= tables.get(tableIdx).getStartOffset()) {
                                 break;
@@ -145,13 +177,13 @@ public class DocHandler extends AbstractHandler {
                         continue;
                     }
                 }
-                // 无法匹配到表格 → 按普通单元格处理
+                // 无法匹配到表格 → 按普通单元格处理（防御性回退）
                 String text = buildParagraphText(para);
                 if (!text.isEmpty()) {
                     result.addElement(new Element(position++, "table_cell", text));
                 }
             } else {
-                // 普通段落
+                // 普通段落（不在表格内）
                 String text = buildParagraphText(para);
                 if (!text.isEmpty()) {
                     int headingLevel = detectHeadingLevel(para, styleSheet);
@@ -168,7 +200,7 @@ public class DocHandler extends AbstractHandler {
     }
 
     /**
-     * 构建段落文本，检测删除线。
+     * 构建段落文本：遍历 CharacterRun，检测删除线并包裹 ~~...~~。
      * HWPF CharacterRun 继承自 org.apache.poi.wp.usermodel.CharacterRun，
      * 使用 isStrikeThrough()（注意大写 T）。
      */
@@ -191,8 +223,13 @@ public class DocHandler extends AbstractHandler {
 
     /**
      * 从 HWPF 样式表中检测段落标题级别。
-     * StyleDescription 没有直接的 getLvl()，通过解析样式名称判断：
-     * "Heading 1" / "标题 1" → level 1，以此类推。
+     * 通过 StyleDescription.getName() 解析：
+     * <ul>
+     *   <li>英文："Heading 1" / "Heading 2" → 提取数字</li>
+     *   <li>中文："标题 1" / "标题一" → 提取数字</li>
+     *   <li>纯数字 ID："1" / "2" → 直接解析为整数（POI 有时会映射中文标题为纯数字 ID）</li>
+     * </ul>
+     * 返回值范围 1-9，默认不匹配时返回 0（非标题）。
      */
     static int detectHeadingLevel(Paragraph para, StyleSheet styleSheet) {
         if (styleSheet == null) return 0;
@@ -209,19 +246,18 @@ public class DocHandler extends AbstractHandler {
                 try {
                     return Integer.parseInt(lower.replaceAll("[^0-9]", ""));
                 } catch (NumberFormatException e) {
-                    return 1;
+                    return 1; // "Heading" without number — fallback to level 1
                 }
             }
-            // Chinese: "标题 1", "标题一" (POI may use these or numeric "1"/"2" IDs)
+            // Chinese: "标题 1", "标题一"
             if (lower.contains("标题")) {
                 try {
                     return Integer.parseInt(lower.replaceAll("[^0-9]", ""));
                 } catch (NumberFormatException e) {
-                    return 1;
+                    return 1; // fallback to level 1
                 }
             }
-            // POI sometimes maps Chinese heading styles to plain numeric IDs e.g. "1", "2"
-            // Only accept if the name is purely numeric and in range 1-9
+            // Pure numeric IDs like "1", "2"
             try {
                 int n = Integer.parseInt(name.trim());
                 if (n >= 1 && n <= 9) return n;
@@ -237,6 +273,13 @@ public class DocHandler extends AbstractHandler {
 
     /**
      * 将 HWPF Table 渲染为 Markdown 表格。
+     * 处理逻辑：
+     * <ol>
+     *   <li>遍历所有行，跳过垂直合并的非首单元格（isVerticallyMerged && !isFirstMerged）</li>
+     *   <li>记录最大列数作为统一宽度</li>
+     *   <li>每行补齐到统一宽度，输出 | cell | ... | 格式</li>
+     *   <li>第一行后插入分隔线</li>
+     * </ol>
      */
     private String hwpfTableToMarkdown(Table table) {
         int totalCols = 0;
@@ -247,6 +290,7 @@ public class DocHandler extends AbstractHandler {
             List<String> rowData = new ArrayList<>();
             for (int c = 0; c < row.numCells(); c++) {
                 TableCell cell = row.getCell(c);
+                // 跳过垂直合并的非首单元格（值由 isFirstMerged=true 的单元格承载）
                 if (cell.isVerticallyMerged() && !cell.isFirstMerged()) continue;
                 rowData.add(getCellText(cell).trim());
             }
@@ -258,8 +302,10 @@ public class DocHandler extends AbstractHandler {
         StringBuilder md = new StringBuilder();
         for (int r = 0; r < grid.size(); r++) {
             List<String> rowCells = grid.get(r);
+            // 补齐列数不一致的行
             while (rowCells.size() < totalCols) rowCells.add("");
             md.append("| ").append(String.join(" | ", rowCells)).append(" |\n");
+            // 第一行后插入分隔线
             if (r == 0) {
                 md.append("| ").append("--- | ".repeat(totalCols));
                 md.setLength(md.length() - 3);
@@ -269,6 +315,7 @@ public class DocHandler extends AbstractHandler {
         return md.toString().trim();
     }
 
+    /** 获取单元格内所有段落的文本（段落间以空格分隔）。 */
     private String getCellText(TableCell cell) {
         StringBuilder sb = new StringBuilder();
         for (int p = 0; p < cell.numParagraphs(); p++) {
@@ -285,6 +332,10 @@ public class DocHandler extends AbstractHandler {
 
     // ==================== 图片提取 ====================
 
+    /**
+     * 从 PicturesTable 中提取所有图片，生成 ImageFile + TYPE: image Element。
+     * 与 unpackImages 不同，此处会同时在 result.elements 中添加 image 引用 Element。
+     */
     private int extractImages(HWPFDocument doc, ExtractionResult result, int startPos) {
         PicturesTable picturesTable = doc.getPicturesTable();
         if (picturesTable == null) return 0;
@@ -307,6 +358,10 @@ public class DocHandler extends AbstractHandler {
 
     // ==================== 页眉提取 ====================
 
+    /**
+     * 提取页眉区域的段落文本。
+     * 如果页眉不可用（某些 .doc 文件的 HeaderStoryRange 为 null），静默跳过。
+     */
     private int extractHeaderStory(HWPFDocument doc, ExtractionResult result,
                                      int startPosition, StyleSheet styleSheet) {
         int pos = startPosition;
