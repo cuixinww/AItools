@@ -169,12 +169,21 @@ public class ExcelHandler extends AbstractHandler {
         }
     }
 
+    /**
+     * 智能定位表头行索引。
+     * 多列表：至少 2 个非空单元格视为表头（排除标题/说明行）。
+     * 单列表：至少 1 个非空单元格即为表头。
+     */
     private int findHeaderRowIndex(List<List<String>> allRows) {
+        if (allRows.isEmpty()) return 0;
+        // 判断是否为单列表（所有行的最大列数 ≤1）
+        boolean singleColumn = allRows.stream().allMatch(row -> row.size() <= 1);
+        int threshold = singleColumn ? 1 : 2;
         for (int i = 0; i < allRows.size(); i++) {
             long nonEmpty = allRows.get(i).stream()
                     .filter(c -> c != null && !c.trim().isEmpty())
                     .count();
-            if (nonEmpty >= 2) return i;
+            if (nonEmpty >= threshold) return i;
         }
         return 0;
     }

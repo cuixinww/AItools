@@ -1,4 +1,4 @@
-package com.dg.tools.extractor;
+package com.dg.tools.extractor.handler;
 
 import com.dg.tools.extractor.TestFileFactory;
 import com.dg.tools.extractor.model.Element;
@@ -58,5 +58,49 @@ class ExcelHandlerTest {
     @Test
     void shouldHandleNullFileName() {
         assertThat(handler.supports(null)).isFalse();
+    }
+
+    @Test
+    void shouldUseHeaderRowWithMultipleNonEmptyCells() throws Exception {
+        byte[] xlsx = TestFileFactory.createSimpleExcel("Sheet1",
+                new String[]{"Name", "Age", "City"},
+                new String[]{"Alice", "30", "Beijing"},
+                new String[]{"Bob", "25", "Shanghai"}
+        );
+        ExtractionResult result = handler.extract(TestFileFactory.toInputStream(xlsx), "header.xlsx");
+        assertThat(result.getElements()).isNotEmpty();
+        assertThat(result.getElements().get(0).getType()).isEqualTo("sheet_header");
+    }
+
+    @Test
+    void shouldHandleSheetWithOnlySingleNonEmptyRow() throws Exception {
+        byte[] xlsx = TestFileFactory.createSimpleExcel("Sheet1",
+                new String[]{"Only", "Row"}
+        );
+        ExtractionResult result = handler.extract(TestFileFactory.toInputStream(xlsx), "single.xlsx");
+        assertThat(result.getElements()).isNotEmpty();
+    }
+
+    @Test
+    void shouldSplitWideSheetIntoRegions() throws Exception {
+        byte[] xlsx = TestFileFactory.createSimpleExcel("Sheet1",
+                new String[]{"A1", "B1", "C1", "D1", "E1", "F1"},
+                new String[]{"1", "2", "3", "4", "5", "6"}
+        );
+
+        ExtractionResult result = handler.extract(TestFileFactory.toInputStream(xlsx), "wide.xlsx");
+
+        assertThat(result.getElements()).isNotEmpty();
+        assertThat(result.getElements().get(0).getType()).isEqualTo("sheet_header");
+    }
+
+    @Test
+    void shouldGeneratePreviewForLargeWideTable() throws Exception {
+        byte[] xlsx = TestFileFactory.createLargeExcel("WideSheet", 3, 15);
+
+        ExtractionResult result = handler.extract(TestFileFactory.toInputStream(xlsx), "wide-large.xlsx");
+
+        assertThat(result.getLargeTables()).isNotEmpty();
+        assertThat(result.getLargeTables().get(0).getPreview()).contains("Columns:");
     }
 }

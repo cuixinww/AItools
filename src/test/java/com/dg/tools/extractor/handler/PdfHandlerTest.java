@@ -1,4 +1,4 @@
-package com.dg.tools.extractor;
+package com.dg.tools.extractor.handler;
 
 import com.dg.tools.extractor.TestFileFactory;
 import com.dg.tools.extractor.model.Element;
@@ -56,5 +56,12 @@ class PdfHandlerTest {
     @Test
     void shouldHandleNullFileName() {
         assertThat(handler.supports(null)).isFalse();
+    }
+
+    @Test
+    void shouldHandleInvalidPdfGracefully() throws Exception {
+        byte[] invalid = "not a pdf".getBytes();
+        ExtractionResult result = handler.extract(TestFileFactory.toInputStream(invalid), "bad.pdf");
+        assertThat(result.getErrors()).isNotEmpty();
     }
 }

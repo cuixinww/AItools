@@ -177,44 +177,99 @@ public class OleExtractor {
 
     /**
      * 从 Ole10Native 字节流中解析文件内容。
-     * 格式：4 字节长度 + 文件名（NUL 结尾）+ [可选 4 字节内容长度] + 文件内容。
+     *
+     * Ole10Native 真实格式（[MS-OLEDS] §2.3.3）：
+     *   nativeSize(4LE) + fileName(NUL) + srcPath(NUL) + tmpPath(NUL)
+     *   + nativeDataSize(4LE) + content
+     *
+     * 但部分简化场景只有：nativeSize(4LE) + fileName(NUL) + content。
      *
      * 解析策略：
-     *   1) 跳过 4 字节长度字段，找到文件名 NUL 结尾；
-     *   2) 在 NUL 之后尝试读取一个 4 字节「内容长度」前缀；若该长度合理（不越界、非离谱大），
-     *      则按该长度切出内容；
-     *   3) 若没有合法的长度前缀，则把 NUL 之后的全部剩余字节作为内容返回。
+     *   1) 优先按完整格式解析（跳过 srcPath + tmpPath，读取 nativeDataSize，切出 content）；
+     *   2) 若完整格式失败，回退到简化格式（NUL 后的 4 字节长度探测 / 全部剩余字节）。
      */
     private static byte[] tryExtractOle10NativeContent(byte[] data) {
         if (data == null || data.length < 4) return null;
-        // 跳过开头的 4 字节长度字段，然后定位文件名 NUL 结尾
         int maxScan = Math.min(data.length, 260);
         for (int i = 4; i < maxScan; i++) {
             if (data[i] == 0) {
-                int contentStart = i + 1;
-                // 尝试探测一个 4 字节长度前缀
-                if (contentStart + 4 <= data.length) {
-                    int contentLength = ((data[contentStart] & 0xFF)
-                            | ((data[contentStart + 1] & 0xFF) << 8)
-                            | ((data[contentStart + 2] & 0xFF) << 16)
-                            | ((data[contentStart + 3] & 0xFF) << 24));
-                    // 合法性校验：长度合理且不越界
-                    if (contentLength > 0 && contentStart + 4 + contentLength <= data.length
-                            && contentLength < data.length) {
-                        byte[] content = new byte[contentLength];
-                        System.arraycopy(data, contentStart + 4, content, 0, contentLength);
-                        return content;
-                    }
-                }
-                // 没有合法长度前缀 —— 取 NUL 之后的全部内容
-                if (contentStart < data.length) {
-                    byte[] content = new byte[data.length - contentStart];
-                    System.arraycopy(data, contentStart, content, 0, content.length);
-                    return content;
-                }
-                break;
+                int nameEnd = i; // 文件名 NUL 位置
+
+                // 策略 1：按完整 Ole10Native 格式解析
+                byte[] content = tryExtractFullFormat(data, nameEnd);
+                if (content != null) return content;
+
+                // 策略 2：简化格式回退
+                return tryExtractSimplifiedFormat(data, nameEnd);
             }
         }
         return null;
+    }
+
+    /**
+     * 按完整 Ole10Native 格式解析：
+     *   fileName + NUL + srcPath + NUL + tmpPath + NUL + nativeDataSize(4LE) + content
+     */
+    private static byte[] tryExtractFullFormat(byte[] data, int nameEnd) {
+        // 跳过 srcPath（到下一个 NUL）
+        int srcEnd = skipNulTerminatedString(data, nameEnd + 1);
+        if (srcEnd < 0) return null;
+
+        // 跳过 tmpPath（到下一个 NUL）
+        int tmpEnd = skipNulTerminatedString(data, srcEnd + 1);
+        if (tmpEnd < 0) return null;
+
+        // 读取 4 字节 nativeDataSize（little-endian）
+        int sizeStart = tmpEnd + 1;
+        if (sizeStart + 4 > data.length) return null;
+        int contentLength = ((data[sizeStart] & 0xFF)
+                | ((data[sizeStart + 1] & 0xFF) << 8)
+                | ((data[sizeStart + 2] & 0xFF) << 16)
+                | ((data[sizeStart + 3] & 0xFF) << 24));
+
+        int contentStart = sizeStart + 4;
+        if (contentLength > 0 && contentStart + contentLength <= data.length
+                && contentLength < data.length) {
+            byte[] result = new byte[contentLength];
+            System.arraycopy(data, contentStart, result, 0, contentLength);
+            return result;
+        }
+        return null;
+    }
+
+    /**
+     * 简化格式回退：NUL 之后尝试 4 字节长度前缀，否则取全部剩余字节。
+     */
+    private static byte[] tryExtractSimplifiedFormat(byte[] data, int nameEnd) {
+        int contentStart = nameEnd + 1;
+        // 尝试探测一个 4 字节长度前缀
+        if (contentStart + 4 <= data.length) {
+            int contentLength = ((data[contentStart] & 0xFF)
+                    | ((data[contentStart + 1] & 0xFF) << 8)
+                    | ((data[contentStart + 2] & 0xFF) << 16)
+                    | ((data[contentStart + 3] & 0xFF) << 24));
+            // 合法性校验：长度合理且不越界
+            if (contentLength > 0 && contentStart + 4 + contentLength <= data.length
+                    && contentLength < data.length) {
+                byte[] result = new byte[contentLength];
+                System.arraycopy(data, contentStart + 4, result, 0, contentLength);
+                return result;
+            }
+        }
+        // 没有合法长度前缀 —— 取 NUL 之后的全部内容
+        if (contentStart < data.length) {
+            byte[] result = new byte[data.length - contentStart];
+            System.arraycopy(data, contentStart, result, 0, result.length);
+            return result;
+        }
+        return null;
+    }
+
+    /** 从指定位置开始扫描，找到下一个 NUL（0x00）的位置；找不到返回 -1。 */
+    private static int skipNulTerminatedString(byte[] data, int start) {
+        for (int i = start; i < data.length; i++) {
+            if (data[i] == 0) return i;
+        }
+        return -1;
     }
 }

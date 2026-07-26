@@ -29,6 +29,7 @@ public class TypeDetector {
      */
     private static final Map<String, String> MIME_TO_EXTENSION = Map.ofEntries(
             Map.entry("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx"),
+            Map.entry("application/x-tika-ooxml", "docx"),
             Map.entry("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx"),
             Map.entry("application/vnd.ms-excel", "xls"),
             Map.entry("application/msword", "doc"),
@@ -112,10 +113,20 @@ public class TypeDetector {
         }
 
         try {
-            return tika.detect(data);
+            return normalizeMimeType(tika.detect(data));
         } catch (Exception e) {
             return "application/octet-stream";
         }
+    }
+
+    private String normalizeMimeType(String mime) {
+        if (mime == null) return "application/octet-stream";
+        return switch (mime) {
+            case "application/x-tika-ooxml" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+            case "application/x-tika-msword" -> "application/msword";
+            case "application/x-tika-msoffice" -> "application/vnd.ms-excel";
+            default -> mime;
+        };
     }
 
     /**

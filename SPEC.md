@@ -1,10 +1,10 @@
-# 智能文档解析与检核系统 — 设计规格说明书（v6）
+# 智能文档解析与检核系统 — 设计规格说明书（v7）
 
 ## 1. 概述
 
 对 UR/FS 需求文档进行**全量无损提取**，支持多层嵌套文件（word → excel/pdf/word/zip/图片 → 更深层），将内容展开为平级目录结构。提取层输出结构化的 body.md + chunks/ + data/ + manifest.json，供 AI 检核层按需加载与定向检索。
 
-**v6 更新重点**：三阶段提取架构（UNPACK → TRIAGE+IMAGE → PARSE）、内存隔离、图文回填、无关文档过滤、合并单元格填充、多区域自动切分、CSV 切片索引、文档级优先检索 + 系统层自动导航。
+**v7 更新重点**：编排层落地（RecursiveExtractor）、标题感知分块、Ole10Native 完整格式修复、DocHandler 全功能重写（表格/图片/标题/OLE/页眉）、图片原位内联、删除线标记、PDF Y坐标混排、Phase 1.5 可插拔接口。
 
 ---
 
@@ -509,23 +509,23 @@ PDF Y 坐标排序
 
 | 模块 | 阶段 | 职责 |
 |------|------|------|
-| `RecursiveExtractor` | Phase 1 | UNPACK 入口，递归拆包，写目录骨架 |
+| `RecursiveExtractor` | Phase 1/2/1.5 | 三阶段统一编排层：递归拆包 → 快判+描述 → 逐文件解析 |
+| `ExtractPipeline` | Phase 1/2 | Spring 集成入口（委托 RecursiveExtractor） |
 | `TypeDetector` | Phase 1 | Tika MIME 类型检测 |
-| `OleExtractor` | Phase 1 | OLE 二进制解包 |
-| `TriageProcessor` | Phase 1.5 | LLM 快判过滤无关文档 |
-| `ImageDescriber` | Phase 1.5 | 视觉大模型图片描述，写 img.json |
-| `ParseExecutor` | Phase 2 | 遍历 manifest，逐文件解析 |
-| `DocxHandler` | Phase 2 | .docx/.docm: BodyElement 顺序遍历 |
-| `DocHandler` | Phase 2 | .doc (HWPF) |
-| `ExcelHandler` | Phase 2 | .xlsx/.xls: 合并填充+多区域切分+大表分流+CSV切片 |
-| `PdfHandler` | Phase 2 | .pdf: Y 坐标排序+图文混排 |
-| `ZipHandler` | Phase 2 | .zip 解压递归 |
-| `ImageHandler` | Phase 2 | 图片叶子节点 |
-| `PositionTracker` | Phase 2 | 维护层级 + position 编码 |
-| `StoreWriter` | Phase 2 | 写入 body.md + chunks/ + data/ + manifest 补充 |
+| `OleExtractor` | Phase 1 | OLE2 二进制解包 + 完整 Ole10Native 格式 |
+| `TriageProcessor` | Phase 1.5 | 文档过滤接口（默认 NoOp，可插拔 LLM） |
+| `ImageDescriber` | Phase 1.5 | 图片描述接口（默认 NoOp，可插拔视觉模型） |
+| `DocxHandler` | Phase 1/2 | .docx/.docm: 标题检测 + 图片原位内联 + 删除线 + gridSpan 修复 |
+| `DocHandler` | Phase 1/2 | .doc (HWPF): 段落/标题/表格/图片/OLE/页眉 + 独立 unpack |
+| `ExcelHandler` | Phase 1/2 | .xlsx/.xls: 合并填充+多区域切分+大表分流+CSV切片 |
+| `PdfHandler` | Phase 1/2 | .pdf: Y 坐标图文混排 + 图片原位内联 |
+| `ZipHandler` | Phase 1/2 | .zip 解压递归 + 安全防护 |
+| `ImageHandler` | Phase 1/2 | 图片叶子节点 |
+| `StoreWriter` | Phase 2 | 写入 body.md + chunks/（标题感知分块）+ data/ + media/ + manifest.json |
 | `CsvSlicer` | Phase 2 | CSV 切片，100 行/chunk |
-| `MergeCellResolver` | Phase 2 | 合并单元格向下+向右填充 |
+| `MergeCellResolver` | Phase 2 | 合并单元格向下+向右填充（缓存 FormulaEvaluator） |
 | `RegionSplitter` | Phase 2 | 列填充率多区域自动切分 |
+| `StringUtils` | 通用 | 文件名清洗/CSV 转义/字节读取 |
 
 ---
 
@@ -537,4 +537,4 @@ PDF Y 坐标排序
 | v3 | - | 图片提取、OLE提取、PDF附件、TypeDetector、DocHandler、ImageHandler |
 | v4 | 2026-07-16 | doc_{seq}→源文件名目录、分块策略、原始文档保留、死代码清理 |
 | v5 | 2026-07-17 | CSV可见性修复(schema净化+智能preview)、chunks/index.json large_tables索引、MapReduce AI检核架构 |
-| v6 | 2026-07-17 | 三阶段提取架构(UNPACK→TRIAGE+IMAGE→PARSE)、内存隔离、图文回填、无关文档过滤(LLM快判)、合并单元格填充、多区域自动切分(列填充率)、删除线标记(~~...~~)、CSV切片(100行/chunk)+规则链按需加载、PDF Y坐标排序、文档级优先检索+子文档自包含+系统层自动导航 |
+| v7 | 2026-07-26 | 编排层落地(RecursiveExtractor)、标题感知分块(StoreWriter.writeHierarchicalChunks)、Ole10Native完整格式修复(OleExtractor)、DocHandler全功能重写(表格+图片+标题+OLE+页眉)、图片原位内联(Element TYPE:image)、删除线标记(~~...~~)、PDF Y坐标图文混排、Phase 1.5可插拔接口(TriageProcessor+ImageDescriber)、MergeCellResolver FormulaEvaluator缓存、配置前缀统一(extractor.*)、ExcelHandler单列表头检测修复 |

@@ -1,4 +1,4 @@
-package com.dg.tools.extractor;
+package com.dg.tools.extractor.handler;
 
 import com.dg.tools.extractor.TestFileFactory;
 import com.dg.tools.extractor.model.ExtractionResult;
@@ -84,5 +84,14 @@ class ImageHandlerTest {
         byte[] png = TestFileFactory.createMinimalPng();
         ExtractionResult result = handler.extract(TestFileFactory.toInputStream(png), "photo.jpg");
         assertThat(result.getImages().get(0).getFormat()).isEqualTo("jpg");
+    }
+
+    @Test
+    void shouldRejectOversizedImages() throws Exception {
+        ImageHandler oversizedHandler = new ImageHandler(1024);
+        byte[] data = new byte[2048];
+        ExtractionResult result = oversizedHandler.extract(TestFileFactory.toInputStream(data), "big.png");
+        assertThat(result.getErrors()).hasSize(1);
+        assertThat(result.getImages()).isEmpty();
     }
 }

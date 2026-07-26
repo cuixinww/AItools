@@ -22,8 +22,12 @@ public final class StringUtils {
 
     public static String sanitizeFileName(String name) {
         if (name == null || name.isEmpty()) return "unnamed";
-        return name.replaceAll("[^a-zA-Z0-9\\u4e00-\\u9fa5\\u0400-\\u04FF\\u0600-\\u06FF\\uAC00-\\uD7AF_-]", "_")
+        String sanitized = name.replaceAll("[^a-zA-Z0-9\\u4e00-\\u9fa5\\u0400-\\u04FF\\u0600-\\u06FF\\uAC00-\\uD7AF._-]", "_")
                 .replaceAll("_+", "_");
+        if (sanitized.endsWith(".")) {
+            sanitized = sanitized.substring(0, sanitized.length() - 1);
+        }
+        return sanitized;
     }
 
     public static String escapeCsv(String value) {
@@ -35,6 +39,9 @@ public final class StringUtils {
     }
 
     public static String toCsvLine(List<String> row) {
+        if (row == null) {
+            return "";
+        }
         StringJoiner sj = new StringJoiner(",");
         for (String cell : row) {
             sj.add(escapeCsv(cell));

@@ -1,4 +1,4 @@
-package com.dg.tools.extractor;
+package com.dg.tools.extractor.handler;
 
 import com.dg.tools.extractor.TestFileFactory;
 import com.dg.tools.extractor.model.ExtractionResult;
@@ -60,7 +60,6 @@ class ZipHandlerTest {
 
     @Test
     void shouldRejectPathTraversal() throws Exception {
-        // Build zip with path traversal entry
         java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
         try (java.util.zip.ZipOutputStream zos = new java.util.zip.ZipOutputStream(baos)) {
             java.util.zip.ZipEntry evil = new java.util.zip.ZipEntry("../evil.txt");
@@ -72,7 +71,25 @@ class ZipHandlerTest {
             zos.closeEntry();
         }
         ExtractionResult result = handler.extract(TestFileFactory.toInputStream(baos.toByteArray()), "test.zip");
-        // Only safe entries should be extracted
         assertThat(result.getEmbeddedFiles()).allMatch(ef -> !ef.getFileName().contains(".."));
+    }
+
+    @Test
+    void shouldReportErrorWhenZipContainsNoEntries() throws Exception {
+        byte[] zip = TestFileFactory.createSimpleZip();
+        ExtractionResult result = handler.extract(TestFileFactory.toInputStream(zip), "empty.zip");
+        assertThat(result.getErrors()).isNotEmpty();
+    }
+
+    @Test
+    void shouldSkipInvalidEntry() throws Exception {
+        java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+        try (java.util.zip.ZipOutputStream zos = new java.util.zip.ZipOutputStream(baos)) {
+            zos.putNextEntry(new java.util.zip.ZipEntry("bad.bin"));
+            zos.write(new byte[0]);
+            zos.closeEntry();
+        }
+        ExtractionResult result = handler.extract(TestFileFactory.toInputStream(baos.toByteArray()), "test.zip");
+        assertThat(result.getEmbeddedFiles()).isEmpty();
     }
 }

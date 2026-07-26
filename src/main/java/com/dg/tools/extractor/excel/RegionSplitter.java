@@ -53,6 +53,17 @@ public class RegionSplitter {
             fillRates[col] = (double) nonEmpty / totalRows;
         }
 
+        boolean allEmpty = true;
+        for (double rate : fillRates) {
+            if (rate > 0.0) {
+                allEmpty = false;
+                break;
+            }
+        }
+        if (allEmpty) {
+            return List.of();
+        }
+
         // 找出连续空列分组
         List<int[]> emptyGroups = new ArrayList<>();
         int i = 0;
@@ -97,20 +108,21 @@ public class RegionSplitter {
         for (int[] bounds : regionBounds) {
             int startCol = bounds[0];
             int endCol = bounds[1];
+            if (startCol > endCol) {
+                continue;
+            }
             List<List<String>> regionRows = new ArrayList<>();
             for (List<String> row : allRows) {
                 List<String> regionRow = new ArrayList<>();
-                for (int col = startCol; col <= endCol && col < row.size(); col++) {
-                    regionRow.add(row.get(col));
+                for (int col = startCol; col <= endCol; col++) {
+                    if (col < row.size()) {
+                        regionRow.add(row.get(col));
+                    } else {
+                        regionRow.add("");
+                    }
                 }
-                // 列数不足时补空
-                while (regionRow.size() < (endCol - startCol + 1)) {
-                    regionRow.add("");
-                }
-                // ✅ 关键修正：将构建好的 regionRow 加入 regionRows
                 regionRows.add(regionRow);
             }
-            // ✅ 关键修正：在所有行构建完成后，再创建 Region 对象并加入列表
             regions.add(new Region(startCol, endCol, regionRows));
         }
 

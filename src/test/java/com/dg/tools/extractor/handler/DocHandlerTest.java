@@ -1,4 +1,4 @@
-package com.dg.tools.extractor;
+package com.dg.tools.extractor.handler;
 
 import com.dg.tools.extractor.model.ExtractionResult;
 import com.dg.tools.extractor.handler.DocHandler;

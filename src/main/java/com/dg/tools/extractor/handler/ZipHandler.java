@@ -82,9 +82,11 @@ public class ZipHandler extends AbstractHandler {
         int entryCount = 0;
         int position = 0;
 
+        boolean sawAnyEntry = false;
         try (ZipInputStream zis = new ZipInputStream(is)) {
             ZipEntry entry;
             while ((entry = zis.getNextEntry()) != null) {
+                sawAnyEntry = true;
                 if (entry.isDirectory()) continue;
 
                 String entryName = sanitizeEntryName(entry.getName());
@@ -103,7 +105,10 @@ public class ZipHandler extends AbstractHandler {
                 }
 
                 byte[] data = readEntry(zis, entryName);
-                if (data == null) continue;
+                if (data == null || data.length == 0) {
+                    log.warn("ZipHandler: skipping empty or unreadable entry: {}", entryName);
+                    continue;
+                }
 
                 totalUncompressed += data.length;
                 if (totalUncompressed > maxTotalSize) {
@@ -112,6 +117,9 @@ public class ZipHandler extends AbstractHandler {
                 }
 
                 addEmbedded.accept(new EmbeddedFile(entryName, position++, data));
+            }
+            if (!sawAnyEntry) {
+                addError.accept("parse error: no entries found");
             }
         } catch (Exception e) {
             log.error("Failed to parse zip: {}", fileName, e);

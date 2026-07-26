@@ -19,7 +19,7 @@ import java.util.List;
  *   - schema   ：列名，以 " | " 分隔；
  *   - preview  ：预览文本（Columns 行 + 前 2 行数据）；
  *   - rowCount ：总行数；
- *   - allRows  ：全部行数据（含表头），供写完整 CSV。
+ *   - allRows  ：全部行数据（含表头），供写完整 CSV。写出后可调用 clearRows() 释放内存。
  */
 @Data
 @NoArgsConstructor
@@ -32,4 +32,8 @@ public class LargeTableInfo {
     private int rowCount;
     private List<List<String>> allRows;
 
+    /** CSV 写出后调用，释放 allRows 引用允许 GC 回收。 */
+    public void clearRows() {
+        this.allRows = null;
+    }
 }

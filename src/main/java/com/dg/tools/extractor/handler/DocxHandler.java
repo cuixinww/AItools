@@ -25,6 +25,7 @@ import java.util.Map;
  * 阶段 2（extract）：按文档 XML 原始元素顺序（getBodyElements）遍历，
  *   依次处理页眉页脚、正文段落、表格（含单元格内图片）、内嵌文件与 OLE 对象，
  *   保证图片 / 嵌入对象与其上下文段落的相对顺序被保留。
+ *   图片在正文中生成 TYPE: image Element，写入位置与原文一致。
  *
  * OLE 对象通过 {@link OleExtractor} 进一步解出内部真实文件。
  *
@@ -166,15 +167,11 @@ public class DocxHandler extends AbstractHandler {
                 if (element instanceof XWPFParagraph para) {
                     position += extractParagraph(para, result, position);
                 } else if (element instanceof XWPFTable table) {
+                    // 先提取表格单元格内的图片（生成 TYPE: image Element，放置于 table 之前）
+                    position += extractImagesFromTable(table, result, position);
+                    // 再渲染表格 Markdown
                     String md = tableToMarkdown(table);
                     result.addElement(new Element(position++, "table", md));
-                    for (XWPFTableRow row : table.getRows()) {
-                        for (XWPFTableCell cell : row.getTableCells()) {
-                            for (XWPFParagraph para : cell.getParagraphs()) {
-                                position += unpackImagesFromParagraph(para, result, position);
-                            }
-                        }
-                    }
                 }
             }
 
@@ -189,12 +186,115 @@ public class DocxHandler extends AbstractHandler {
         return result;
     }
 
+    /**
+     * 提取段落中包含的图片与文本，按 run 的真实遍历顺序交替输出。
+     * 每个含图片的 run 生成 TYPE: image Element，文本 run 合并后生成 TYPE: paragraph Element。
+     * 保证图文顺序与原文一致。删除线文本包裹 ~~...~~。
+     */
     private int extractParagraph(XWPFParagraph para, ExtractionResult result, int position) {
-        int count = unpackImagesFromParagraph(para, result, position);
-        String text = para.getText();
-        if (text != null && !text.isBlank()) {
-            result.addElement(new Element(position + count, "paragraph", text.trim()));
-            count++;
+        String paraStyle = para.getStyle();
+        int headingLevel = detectHeadingLevel(paraStyle);
+        int count = 0;
+        StringBuilder textBuf = new StringBuilder();
+
+        for (XWPFRun run : para.getRuns()) {
+            // 处理该 run 中的嵌入图片
+            for (XWPFPicture pic : run.getEmbeddedPictures()) {
+                // 先将缓冲的文本 flush
+                if (!textBuf.isEmpty()) {
+                    addParagraphElement(result, position++, textBuf.toString().trim(), headingLevel);
+                    textBuf.setLength(0);
+                    count++;
+                }
+                // 图片 element
+                XWPFPictureData picData = pic.getPictureData();
+                String picFileName = picData.getFileName();
+                if (picFileName == null || picFileName.isEmpty()) {
+                    picFileName = "image_" + position + "." + picData.suggestFileExtension();
+                }
+                result.addImage(new ImageFile(picFileName, position,
+                        picData.getData(), picData.suggestFileExtension()));
+                result.addElement(new Element(position, "image", null,
+                        "file: media/" + StringUtils.sanitizeFileName(picFileName)));
+                count++;
+                position++;
+            }
+            // 处理该 run 中的文本
+            String runText = run.text();
+            if (runText != null && !runText.isEmpty()) {
+                if (!textBuf.isEmpty()) textBuf.append(' ');
+                if (run.isStrikeThrough()) {
+                    textBuf.append("~~").append(runText).append("~~");
+                } else {
+                    textBuf.append(runText);
+                }
+            }
+        }
+        // flush 剩余的文本
+        if (!textBuf.isEmpty()) {
+            String finalText = textBuf.toString().trim();
+            if (!finalText.isEmpty()) {
+                addParagraphElement(result, position, finalText, headingLevel);
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private void addParagraphElement(ExtractionResult result, int pos, String text, int headingLevel) {
+        Element elem = new Element(pos, "paragraph", text);
+        if (headingLevel > 0) elem.setHeadingLevel(headingLevel);
+        result.addElement(elem);
+    }
+
+    /**
+     * 从段落样式 ID 中检测标题级别。
+     * OOXML 标题样式 ID 通常为 "Heading1", "Heading2" 等，或中文 "1", "2" 等
+     * （POI 有时映射中文标题为数字样式 ID）。
+     */
+    static int detectHeadingLevel(String styleId) {
+        if (styleId == null) return 0;
+        if (styleId.startsWith("Heading") || styleId.startsWith("heading")) {
+            try {
+                return Integer.parseInt(styleId.replaceAll("[^0-9]", ""));
+            } catch (NumberFormatException e) {
+                return 0; // "Heading" without number — not a real heading
+            }
+        }
+        try {
+            int n = Integer.parseInt(styleId);
+            if (n >= 1 && n <= 9) return n;
+        } catch (NumberFormatException ignored) {
+        }
+        return 0;
+    }
+
+    /**
+     * 提取表格中所有单元格内的图片，生成 TYPE: image Element。
+     * 图片位置在表格 Element 之前，保证合理的图文顺序。
+     */
+    private int extractImagesFromTable(XWPFTable table, ExtractionResult result, int position) {
+        int count = 0;
+        for (XWPFTableRow row : table.getRows()) {
+            for (XWPFTableCell cell : row.getTableCells()) {
+                for (XWPFParagraph para : cell.getParagraphs()) {
+                    for (XWPFRun run : para.getRuns()) {
+                        for (XWPFPicture pic : run.getEmbeddedPictures()) {
+                            XWPFPictureData picData = pic.getPictureData();
+                            String picFileName = picData.getFileName();
+                            if (picFileName == null || picFileName.isEmpty()) {
+                                picFileName = "image_" + position + "." + picData.suggestFileExtension();
+                            }
+                            result.addImage(new ImageFile(picFileName, position,
+                                    picData.getData(), picData.suggestFileExtension()));
+                            result.addElement(new Element(position, "image", null,
+                                    "file: media/" + StringUtils.sanitizeFileName(picFileName)));
+                            count++;
+                            position++;
+                        }
+                    }
+                }
+            }
         }
         return count;
     }
@@ -228,8 +328,12 @@ public class DocxHandler extends AbstractHandler {
         return pos - startPosition;
     }
 
-    // ==================== 表格渲染 ====================
+    // ==================== 表格渲染（修复 gridSpan） ====================
 
+    /**
+     * 将 XWPFTable 渲染为 Markdown 表格。
+     * 使用显式列索引跟踪处理 gridSpan（合并单元格），确保列对齐正确。
+     */
     private String tableToMarkdown(XWPFTable table) {
         int totalCols = table.getRows().stream()
                 .mapToInt(row -> row.getTableCells().stream()
@@ -244,28 +348,30 @@ public class DocxHandler extends AbstractHandler {
         StringBuilder md = new StringBuilder();
         for (int r = 0; r < table.getRows().size(); r++) {
             XWPFTableRow row = table.getRow(r);
-            List<String> rowCells = new ArrayList<>();
+            // 使用与总列数相同大小的数组，用空字符串初始化
+            String[] rowCells = new String[totalCols];
+            for (int c = 0; c < totalCols; c++) rowCells[c] = "";
 
+            int colIdx = 0;
             for (XWPFTableCell cell : row.getTableCells()) {
+                // 跳过已被上方行合并单元格覆盖的位置（垂直合并的非首单元格）
                 int span = 1;
                 var tcPr = cell.getCTTc().getTcPr();
                 if (tcPr != null && tcPr.getGridSpan() != null && tcPr.getGridSpan().getVal() != null) {
                     span = tcPr.getGridSpan().getVal().intValue();
                 }
-                String cellText = cell.getText().trim();
-                rowCells.add(cellText);
-                for (int s = 1; s < span; s++) {
-                    rowCells.add("");
-                }
-            }
-            while (rowCells.size() < totalCols) {
-                rowCells.add("");
+                // 确保不越界
+                if (colIdx >= totalCols) break;
+                rowCells[colIdx] = cell.getText().trim();
+                colIdx += span;
             }
 
             md.append("| ").append(String.join(" | ", rowCells)).append(" |\n");
             if (r == 0) {
-                md.append("| ").append(rowCells.stream().map(c -> "---")
-                        .collect(java.util.stream.Collectors.joining(" | "))).append(" |\n");
+                md.append("| ").append("--- | ".repeat(totalCols));
+                // 去除末尾多余的 " | "
+                md.setLength(md.length() - 3);
+                md.append(" |\n");
             }
         }
         return md.toString().trim();

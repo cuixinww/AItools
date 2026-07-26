@@ -2,8 +2,10 @@ package com.dg.tools.extractor.excel;
 
 import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.ss.usermodel.Cell;
+import org.apache.poi.ss.usermodel.CellValue;
 import org.apache.poi.ss.usermodel.DataFormatter;
 import org.apache.poi.ss.usermodel.DateUtil;
+import org.apache.poi.ss.usermodel.FormulaEvaluator;
 import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.ss.util.CellRangeAddress;
@@ -29,12 +31,18 @@ public class MergeCellResolver {
 
     /**
      * 读取一个 Sheet 的全部行，填充合并单元格值并做列数归一化。
+     * FormulaEvaluator 在整个 readRows 调用中只创建一次、复用，
+     * 避免每个公式单元格都 new 一个 evaluator。
      *
      * @param sheet 待处理的 Sheet
      * @return 完全填充后的矩形行数据（每行长度一致）
      */
     public static List<List<String>> readRows(Sheet sheet) {
         List<CellRangeAddress> mergedRegions = sheet.getMergedRegions();
+
+        // 每个 readRows 调用创建一次 DataFormatter 和 FormulaEvaluator
+        DataFormatter formatter = new DataFormatter();
+        FormulaEvaluator evaluator = sheet.getWorkbook().getCreationHelper().createFormulaEvaluator();
 
         // 第一遍：读取所有行，记录最大列数
         List<RowData> rows = new ArrayList<>();
@@ -44,7 +52,7 @@ public class MergeCellResolver {
             List<String> rowData = new ArrayList<>();
             int lastCol = row.getLastCellNum();
             for (int c = 0; c < lastCol; c++) {
-                rowData.add(getCellValue(row.getCell(c)));
+                rowData.add(getCellValue(row.getCell(c), formatter, evaluator));
             }
             rows.add(new RowData(row.getRowNum(), rowData));
             maxCols = Math.max(maxCols, lastCol);
@@ -58,7 +66,8 @@ public class MergeCellResolver {
         // 预缓存每个合并区域的源值（区域左上角单元格的值），每个区域只读取一次
         Map<CellRangeAddress, String> regionValues = new HashMap<>();
         for (CellRangeAddress region : mergedRegions) {
-            String sv = getCellValueFromSheet(sheet, region.getFirstRow(), region.getFirstColumn());
+            String sv = getCellValueFromSheet(sheet, region.getFirstRow(), region.getFirstColumn(),
+                    formatter, evaluator);
             if (sv != null && !sv.isEmpty()) {
                 regionValues.put(region, sv);
             }
@@ -99,34 +108,37 @@ public class MergeCellResolver {
 
     // ==================== 单元格取值 ====================
 
-    /** POI 的单元格格式化器（处理日期、自定义格式、避免科学计数法等）。 */
-    private static final ThreadLocal<DataFormatter> FORMATTER = ThreadLocal.withInitial(DataFormatter::new);
-
     /** 从指定坐标读取单元格值（行不存在时返回空串）。 */
-    private static String getCellValueFromSheet(Sheet sheet, int rowNum, int colNum) {
+    private static String getCellValueFromSheet(Sheet sheet, int rowNum, int colNum,
+                                                  DataFormatter formatter, FormulaEvaluator evaluator) {
         Row row = sheet.getRow(rowNum);
         if (row == null) return "";
-        return getCellValue(row.getCell(colNum));
+        return getCellValue(row.getCell(colNum), formatter, evaluator);
     }
 
-    /** 按单元格类型读取值并统一转为字符串。 */
+    /** 按单元格类型读取值并统一转为字符串（兼容旧调用方）。 */
     static String getCellValue(Cell cell) {
+        return getCellValue(cell, new DataFormatter(), null);
+    }
+
+    /** 按单元格类型读取值并统一转为字符串（带缓存的 formatter/evaluator）。 */
+    static String getCellValue(Cell cell, DataFormatter formatter, FormulaEvaluator evaluator) {
         if (cell == null) return "";
         return switch (cell.getCellType()) {
             case STRING -> cell.getStringCellValue();
-            case NUMERIC -> formatNumeric(cell);
+            case NUMERIC -> formatNumeric(cell, formatter);
             case BOOLEAN -> String.valueOf(cell.getBooleanCellValue());
-            case FORMULA -> formatFormula(cell);
+            case FORMULA -> formatFormula(cell, formatter, evaluator);
             default -> "";
         };
     }
 
     /** 数值单元格格式化：日期用 DataFormatter；整数去小数；其余尽量不用科学计数法。 */
-    private static String formatNumeric(Cell cell) {
+    private static String formatNumeric(Cell cell, DataFormatter formatter) {
         // 优先用 DataFormatter 处理日期、自定义格式，并避免科学计数法
         if (DateUtil.isCellDateFormatted(cell)) {
             try {
-                return FORMATTER.get().formatCellValue(cell);
+                return formatter.formatCellValue(cell);
             } catch (Exception e) {
                 log.warn("Failed to format date cell", e);
             }
@@ -139,29 +151,34 @@ public class MergeCellResolver {
         }
         // 其余情况用 BigDecimal 风格格式化（DataFormatter 最稳妥）
         try {
-            return FORMATTER.get().formatCellValue(cell);
+            return formatter.formatCellValue(cell);
         } catch (Exception e) {
             log.warn("Failed to format numeric cell, falling back to raw value", e);
             return String.valueOf(v);
         }
     }
 
-    /** 公式单元格格式化：优先取缓存的数值结果，失败再依次尝试字符串 / 布尔 / 公式文本。 */
-    private static String formatFormula(Cell cell) {
+    /** 公式单元格格式化：用缓存的 evaluator 计算真实结果，再回退至字符串/公式文本。 */
+    private static String formatFormula(Cell cell, DataFormatter formatter, FormulaEvaluator evaluator) {
         try {
-            return String.valueOf(cell.getNumericCellValue());
-        } catch (Exception e1) {
-            log.warn("Failed to read formula numeric result, trying string", e1);
-        }
-        try {
-            return cell.getStringCellValue();
-        } catch (Exception e2) {
-            log.warn("Failed to read formula string result, trying boolean", e2);
-        }
-        try {
-            return String.valueOf(cell.getBooleanCellValue());
-        } catch (Exception e3) {
-            log.warn("Failed to read formula boolean result, returning formula text", e3);
+            if (evaluator == null) {
+                // 兼容旧调用方（无 evaluator 时）
+                evaluator = cell.getSheet().getWorkbook().getCreationHelper().createFormulaEvaluator();
+            }
+            CellValue value = evaluator.evaluate(cell);
+            if (value == null) {
+                return cell.getCellFormula();
+            }
+            return switch (value.getCellType()) {
+                case NUMERIC -> String.valueOf(value.getNumberValue());
+                case STRING -> value.getStringValue();
+                case BOOLEAN -> String.valueOf(value.getBooleanValue());
+                case BLANK -> "";
+                case ERROR -> "";
+                default -> cell.getCellFormula();
+            };
+        } catch (Exception e) {
+            log.warn("Failed to evaluate formula cell, falling back to formula text", e);
             return cell.getCellFormula();
         }
     }

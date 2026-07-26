@@ -27,23 +27,34 @@
 ### 源码结构
 ```
 src/main/java/com/dg/tools/extractor/
-├── model/           # 数据模型 (Element, ExtractionResult, UnpackResult, etc.)
+├── model/           # 数据模型 (Element, ExtractionResult, EmbeddedFile, etc.)
 ├── handler/         # 文档处理器接口及实现
-│   ├── DocumentHandler.java  (接口)
-│   ├── DocxHandler.java
-│   ├── DocHandler.java
-│   ├── ExcelHandler.java
-│   ├── PdfHandler.java
-│   ├── ZipHandler.java
-│   └── ImageHandler.java
+│   ├── AbstractHandler.java  (抽象基类)
+│   ├── DocxHandler.java      (.docx/.docm — OOXML)
+│   ├── DocHandler.java       (.doc — OLE2/HWPF，含表格/图片/标题/OLE)
+│   ├── ExcelHandler.java     (.xlsx/.xls — 合并填充/多区域切分/大小表分流)
+│   ├── PdfHandler.java       (.pdf — Y坐标图文混排)
+│   ├── ZipHandler.java       (.zip — 递归解包+安全防护)
+│   └── ImageHandler.java     (图片叶子节点)
 ├── excel/           # Excel 专项工具
-│   ├── MergeCellResolver.java
-│   ├── RegionSplitter.java
-│   └── CsvSlicer.java
-├── RecursiveExtractor.java    (Phase 1/2 统一入口)
+│   ├── MergeCellResolver.java  (合并单元格向下+向右填充)
+│   ├── RegionSplitter.java     (列填充率多区域自动切分)
+│   └── CsvSlicer.java          (CSV切片，100行/chunk)
+├── triage/          # Phase 1.5 文档过滤（可插拔接口）
+│   ├── TriageProcessor.java    (接口)
+│   ├── NoOpTriageProcessor.java (默认空实现)
+│   └── RelevanceAssessment.java (模型)
+├── image/           # Phase 1.5 图片描述（可插拔接口）
+│   ├── ImageDescriber.java     (接口)
+│   ├── NoOpImageDescriber.java  (默认空实现)
+│   └── ImageDescription.java   (模型)
+├── RecursiveExtractor.java    (Phase 1/2/1.5 三阶段统一编排层)
+├── ExtractPipeline.java       (Spring 集成入口，委托 RecursiveExtractor)
 ├── TypeDetector.java          (Tika MIME 探测)
-├── OleExtractor.java          (OLE2 二进制解包)
-└── StoreWriter.java           (产物落盘)
+├── OleExtractor.java          (OLE2 二进制解包，完整 Ole10Native 格式)
+├── StoreWriter.java           (产物落盘 + 标题感知分块)
+└── util/
+    └── StringUtils.java       (文件名清洗/CSV转义/字节读取)
 ```
 
 ---
@@ -264,21 +275,20 @@ mvn verify                        # 测试 + 覆盖率报告
 
 ---
 
-## 8. 未来实现路线图（按 SPEC v6）
+## 8. 未来实现路线图（按 SPEC v7）
 
 优先级按 SPEC 缺失程度排序：
 
 | 优先级 | 功能模块 | SPEC 章节 | 备注 |
 |--------|---------|-----------|------|
-| P0 | `TriageProcessor` (LLM快判) | §3 Phase 1.5 | 核心差异化能力 |
-| P0 | `ImageDescriber` (视觉模型) | §3 Phase 1.5 | 图文回填 |
+| P0 | TriageProcessor 接入真实 LLM | §3 Phase 1.5 | 接口已定义，需实现 LLM 调用 |
+| P0 | ImageDescriber 接入视觉模型 | §3 Phase 1.5 | 接口已定义，需实现视觉模型调用 |
 | P1 | CSV 按需加载规则链 | §8.4 | AI检核层 |
 | P1 | 文档级优先检索 | §8.1 | AI检核层 |
 | P1 | 系统层自动导航 | §8.2 | AI检核层 |
-| P2 | PDF Y坐标排序 | §12 v6变更 | 当前仅按页面顺序 |
-| P2 | 删除线标记 ~~~...~~~ 处理 | §12 v6变更 | 文本清洗 |
+| P2 | 用户需求相关性粗评（LLM 打分） | §5.1 | 切分后先评再提取嵌套文件 |
+| P3 | 按 MIME 类型路由 | §9 | 当前按扩展名路由，TypeDetector 未用于路由 |
 | P3 | MemRay 内存分析工具集成 | §7 | 可选优化 |
-| P3 | MapReduce AI检核架构 | §5.2 | 可选优化 |
 
 ---
 
