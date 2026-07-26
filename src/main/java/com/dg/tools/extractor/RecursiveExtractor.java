@@ -3,7 +3,9 @@ package com.dg.tools.extractor;
 import com.dg.tools.extractor.handler.AbstractHandler;
 import com.dg.tools.extractor.image.ImageDescriber;
 import com.dg.tools.extractor.image.ImageDescription;
+import com.dg.tools.extractor.image.NoOpImageDescriber;
 import com.dg.tools.extractor.model.*;
+import com.dg.tools.extractor.triage.NoOpTriageProcessor;
 import com.dg.tools.extractor.triage.RelevanceAssessment;
 import com.dg.tools.extractor.triage.TriageProcessor;
 import com.dg.tools.extractor.util.StringUtils;
@@ -80,16 +82,16 @@ public class RecursiveExtractor {
             List<AbstractHandler> handlers,
             StoreWriter storeWriter,
             TypeDetector typeDetector,
-            TriageProcessor triageProcessor,
-            ImageDescriber imageDescriber,
+            @Autowired(required = false) TriageProcessor triageProcessor,
+            @Autowired(required = false) ImageDescriber imageDescriber,
             @Value("${extractor.pipeline.max-depth:10}") int maxDepth,
             @Value("${extractor.pipeline.max-file-size:209715200}") long maxFileSize,
             @Value("${extractor.output.base:extracted}") String outputBase) {
         this.handlers = handlers;
         this.storeWriter = storeWriter;
         this.typeDetector = typeDetector;
-        this.triageProcessor = triageProcessor;
-        this.imageDescriber = imageDescriber;
+        this.triageProcessor = triageProcessor != null ? triageProcessor : new NoOpTriageProcessor();
+        this.imageDescriber = imageDescriber != null ? imageDescriber : new NoOpImageDescriber();
         this.maxDepth = maxDepth;
         this.maxFileSize = maxFileSize;
         this.outputBase = Paths.get(outputBase);
@@ -133,6 +135,9 @@ public class RecursiveExtractor {
         for (DocEntry entry : session.pendingEntries) {
             parseEntry(entry, session);
         }
+
+        // Phase 2 后修正：将 parent 引用中的 unpack position 替换为 Element.position
+        session.fixupParentPositions();
 
         // 写 manifest.json（汇总所有 DocInfo）
         String manifestJson = StoreWriter.buildManifestJson(sessionId, fileName, session.docInfoList);
@@ -304,12 +309,30 @@ public class RecursiveExtractor {
             session.updateDocInfo(entry.seq, parsed.getElements().size(),
                     parsed.getLargeTables().size(), parsed.getImages().size());
 
+            // 缓存 embed Element 位置映射（供 fixupParentPositions 使用）
+            cacheEmbedElementPositions(entry.seq, parsed, session);
+
         } catch (Exception e) {
             log.error("Phase 2 parse failed for: {}", entry.fileName, e);
             session.updateDocInfoStatus(entry.seq, "error");
         } finally {
             // 释放 rawBytes 引用，允许 GC 回收该文件的字节数据
             entry.release();
+        }
+    }
+
+    /**
+     * 缓存父文档中 embed 位置映射（供 fixupParentPositions 使用）。
+     */
+    private void cacheEmbedElementPositions(int seq, ExtractionResult parsed, Session session) {
+        StoreWriter.DocInfo docInfo = null;
+        for (StoreWriter.DocInfo d : session.docInfoList) {
+            if (d.seq == seq) { docInfo = d; break; }
+        }
+        if (docInfo == null) return;
+        docInfo.embedElementPositions = new LinkedHashMap<>();
+        for (EmbeddedFile emb : parsed.getEmbeddedFiles()) {
+            docInfo.embedElementPositions.put(emb.getPosition(), emb.getPosition());
         }
     }
 
@@ -433,6 +456,41 @@ public class RecursiveExtractor {
                     return;
                 }
             }
+        }
+
+        /**
+         * Phase 2 完成后修正 parent 引用：将 unpack 阶段的 EmbeddedFile.position
+         * 替换为 Phase 2 解析后的 Element.position。
+         * parent 格式从 "dirName, pos=N" 变为 "dirName, element_pos=N"。
+         */
+        void fixupParentPositions() {
+            for (StoreWriter.DocInfo d : docInfoList) {
+                if (d.parentInfo == null) continue;
+                String[] parts = d.parentInfo.split(", pos=", 2);
+                if (parts.length != 2) continue;
+                String parentDir = parts[0];
+                int unpackPos;
+                try {
+                    unpackPos = Integer.parseInt(parts[1]);
+                } catch (NumberFormatException e) {
+                    continue;
+                }
+                // 在父文档的 elements 中查找该位置附近的 embed Element
+                StoreWriter.DocInfo parent = findDocByDir(parentDir);
+                if (parent == null || parent.embedElementPositions == null) continue;
+                // 使用父文档缓存的 embed Element 位置映射
+                Integer elementPos = parent.embedElementPositions.get(unpackPos);
+                if (elementPos != null) {
+                    d.parentInfo = parentDir + ", element_pos=" + elementPos;
+                }
+            }
+        }
+
+        private StoreWriter.DocInfo findDocByDir(String dir) {
+            for (StoreWriter.DocInfo d : docInfoList) {
+                if (dir.equals(d.dir)) return d;
+            }
+            return null;
         }
     }
 

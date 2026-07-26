@@ -502,8 +502,14 @@ public class StoreWriter {
         public int imageCount;
         /** 生成的 chunk 数量。 */
         public int chunkCount;
-        /** 父级引用描述，如 "dirName pos=3"。 */
-        public final String parentInfo;
+        /** 父级引用描述，如 "dirName, pos=N" 或 "dirName, element_pos=N"。 */
+        public String parentInfo;
+        /**
+         * Phase 2 后用于 parent pos 修正的缓存：
+         * key = EmbeddedFile.position（unpack 阶段的 position），
+         * value = Element.position（Phase 2 解析后 embed 元素在 body.md 中的 POS 号）。
+         */
+        public Map<Integer, Integer> embedElementPositions;
         /** 状态："pending" / "done" / "filtered" / "error"。 */
         public String status;
         /** filtered 原因。 */
