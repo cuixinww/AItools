@@ -5,6 +5,8 @@ import org.apache.tika.Tika;
 import org.apache.tika.mime.MimeType;
 import org.apache.tika.mime.MimeTypes;
 
+import org.springframework.lang.Nullable;
+
 import java.util.Map;
 
 import static java.util.Map.entry;
@@ -31,7 +33,6 @@ public class TypeDetector {
      */
     private static final Map<String, String> MIME_TO_EXTENSION = Map.ofEntries(
             Map.entry("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx"),
-            Map.entry("application/x-tika-ooxml", "docx"),
             Map.entry("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx"),
             Map.entry("application/vnd.ms-excel", "xls"),
             Map.entry("application/msword", "doc"),
@@ -66,7 +67,7 @@ public class TypeDetector {
      * @param hintFileName 原始文件名（用于后缀回退）
      * @return 扩展名字符串，如 "docx"；无法判断时回退为 "bin"
      */
-    public String detectExtension(byte[] data, String hintFileName) {
+    public String detectExtension(@Nullable byte[] data, @Nullable String hintFileName) {
         if (data == null || data.length == 0) {
             return fallbackFromName(hintFileName);
         }
@@ -80,8 +81,9 @@ public class TypeDetector {
         }
 
         // 若 Tika 只给出通用类型，则优先信任文件扩展名
+        // x-tika-ooxml 是通用 OOXML 类型（docx/xlsx/pptx 等），不能映射为单一子类型，也回退到文件名后缀
         if ("application/octet-stream".equals(mime) || "text/plain".equals(mime)
-                || "application/zip".equals(mime)) {
+                || "application/zip".equals(mime) || "application/x-tika-ooxml".equals(mime)) {
             String fallback = fallbackFromName(hintFileName);
             if (fallback != null && !"bin".equals(fallback)) {
                 return fallback;
@@ -124,14 +126,15 @@ public class TypeDetector {
 
     /**
      * 将 Tika 的内部 MIME 类型名称规范化为标准 MIME 类型。
-     * 例如 "application/x-tika-ooxml" → "application/vnd.openxmlformats-officedocument.wordprocessingml.document"。
+     * 注意：application/x-tika-ooxml 不做归一化——因为 docx/xlsx/pptx 底层都是 OOXML ZIP，
+     * Tika 仅凭魔数字节无法区分具体子类型。此类型会委托给 detectExtension 的回退分支，
+     * 由文件名后缀做精确判定。
      */
     private String normalizeMimeType(String mime) {
         if (mime == null) return "application/octet-stream";
         return switch (mime) {
-            case "application/x-tika-ooxml" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
             case "application/x-tika-msword" -> "application/msword";
-            case "application/x-tika-msoffice" -> "application/vnd.ms-excel";
+            case "application/x-tika-msoffice" -> "application/octet-stream";
             default -> mime;
         };
     }

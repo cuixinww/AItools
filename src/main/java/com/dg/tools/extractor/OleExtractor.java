@@ -5,6 +5,7 @@ import org.apache.poi.poifs.filesystem.*;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.HashMap;
@@ -38,7 +39,8 @@ public class OleExtractor {
      */
     private static final Set<String> INTERNAL_STREAMS = Set.of(
             "WordDocument", "1Table", "0Table", "Data",
-            "ObjectPool", "CompObj", "ObjInfo"
+            "ObjectPool", "CompObj", "ObjInfo",
+            "\u0001CompObj", "\u0003ObjInfo"
     );
 
     /** 工具类，禁止外部实例化。 */
@@ -123,7 +125,9 @@ public class OleExtractor {
                         byte[] content = tryExtractOle10NativeContent(data);
                         if (content != null && content.length > 0) {
                             // 用 OLE 路径前缀区分来自不同内嵌对象的同名文件
-                            String key = entryPath + "/" + fileName;
+                            // 去掉 OLE2 控制字符前缀（如 \x01Ole10Native → Ole10Native）
+                            String cleanPath = entryPath.replaceAll("^[\u0001-\u0005]", "");
+                            String key = cleanPath + "/" + fileName;
                             result.put(key, content);
                         }
                     }
@@ -163,30 +167,49 @@ public class OleExtractor {
      */
     private static boolean isInternalStream(String name) {
         if (name == null || name.isEmpty()) return true;
-        // OLE2 属性流名称以控制字符（0x01-0x05）开头
-        if (name.charAt(0) >= 0x01 && name.charAt(0) <= 0x05) return true;
+        // 仅过滤 OLE2 属性流（\u0005SummaryInformation 等），不过滤 \u0001Ole10Native 等数据流
+        if (name.charAt(0) == 0x05) return true;
         return INTERNAL_STREAMS.contains(name);
     }
 
     /**
-     * 从 Ole10Native 字节流中解析原始文件名。
-     * 跳过开头 4 字节长度字段，扫描到第一个 NUL 作为文件名结束。
+     * 确定 Ole10Native 数据中 label（文件名等价物）的起始偏移量。
+     * <p>标准 MS 格式：{@code [totalSize(4)][flags1(2)][label\0][fileName\0]...}
+     * <br>简化格式：{@code [totalSize(4)][filename\0]...}
      */
-    private static String tryExtractOle10NativeName(byte[] data) {
+    private static int ole10NativeLabelOffset(byte[] data) {
+        if (data.length >= 6) {
+            int flags1 = (data[4] & 0xFF) | ((data[5] & 0xFF) << 8);
+            // flags1 == 2 表示标准格式，且 label 从偏移 6 开始（必须是可打印字符）
+            if (flags1 == 2 && data[6] >= 0x20 && data[6] < 0x7F) {
+                return 6;
+            }
+        }
+        return 4;
+    }
+
+    /**
+     * 从 Ole10Native 字节流中解析原始文件名（label）。
+     * 考虑标准 MS Ole10Native 格式中 flags1 字段的影响。
+     */
+    private     static String tryExtractOle10NativeName(byte[] data) {
         if (data == null || data.length < 4) return null;
-        // Ole10Native 格式：4 字节长度 + 文件名（NUL 结尾）+ 文件内容
-        // 跳过开头的 4 字节长度字段
-        int maxScan = Math.min(data.length, 260);
-        int start = 4;
+        int start = ole10NativeLabelOffset(data);
+        int maxScan = Math.min(data.length, start + 256);
         for (int i = start; i < maxScan; i++) {
             if (data[i] == 0) {
                 if (i > start) {
-                    return new String(data, start, i - start, StandardCharsets.ISO_8859_1).trim();
+                    return decodeOleLabel(data, start, i - start);
                 }
                 break;
             }
         }
         return null;
+    }
+
+    private static String decodeOleLabel(byte[] bytes, int offset, int length) {
+        String cp936 = new String(bytes, offset, length, Charset.forName("GBK"));
+        return cp936.trim();
     }
 
     /**
@@ -205,10 +228,19 @@ public class OleExtractor {
      */
     private static byte[] tryExtractOle10NativeContent(byte[] data) {
         if (data == null || data.length < 4) return null;
-        int maxScan = Math.min(data.length, 260);
-        for (int i = 4; i < maxScan; i++) {
+        int start = ole10NativeLabelOffset(data);
+
+        // 标准 MS 格式（start == 6）：label 之后的格式不同，使用 POI 原生解析器
+        if (start == 6) {
+            byte[] content = tryExtractStandardContent(data);
+            if (content != null) return content;
+            // POI 解析失败时回退到 nameEnd 之后的通用逻辑
+        }
+
+        int maxScan = Math.min(data.length, start + 256);
+        for (int i = start; i < maxScan; i++) {
             if (data[i] == 0) {
-                int nameEnd = i; // 文件名 NUL 位置
+                int nameEnd = i;
 
                 // 策略 1：按完整 Ole10Native 格式解析
                 byte[] content = tryExtractFullFormat(data, nameEnd);
@@ -219,6 +251,18 @@ public class OleExtractor {
             }
         }
         return null;
+    }
+
+    /**
+     * 使用 POI 的 {@link Ole10Native} 解析器提取标准格式的数据缓冲区。
+     */
+    private static byte[] tryExtractStandardContent(byte[] data) {
+        try {
+            Ole10Native ole10 = new Ole10Native(data, 0);
+            return ole10.getDataBuffer();
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /**

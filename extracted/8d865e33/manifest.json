@@ -1,0 +1,29 @@
+{
+  "_comment" : "会话级提取清单。—— session_id: 提取会话唯一标识; source_file: 源文件名; docs: 文档元信息列表。每个文档字段说明：seq=序号, dir=输出目录, type=文档类型(docx/xlsx/pdf等), element_count=body.md元素总数, data_ref_count=大表(CSV)数量, image_count=图片数, chunk_count=切片数, parent=父文档引用(格式\"目录名, element_pos=N\", N表示在父文档body.md中的元素位置), status=处理状态(done/filtered/error)",
+  "session_id" : "8d865e33",
+  "source_file" : "保险项目用户需求说明书.docx",
+  "docs" : [ {
+    "seq" : 0,
+    "dir" : "保险项目用户需求说明书",
+    "source" : "保险项目用户需求说明书.docx",
+    "source_copy" : "保险项目用户需求说明书/保险项目用户需求说明书.docx",
+    "type" : "docx",
+    "element_count" : 185,
+    "data_ref_count" : 0,
+    "image_count" : 2,
+    "chunk_count" : 0,
+    "status" : "done"
+  }, {
+    "seq" : 1,
+    "dir" : "Ole10Native_CIT_F065_AI-BAU_",
+    "source" : "Ole10Native_CIT_F065_AI-BAU_.pdf",
+    "source_copy" : "Ole10Native_CIT_F065_AI-BAU_/Ole10Native_CIT_F065_AI-BAU_.pdf",
+    "type" : "pdf",
+    "element_count" : 13,
+    "data_ref_count" : 0,
+    "image_count" : 0,
+    "chunk_count" : 0,
+    "parent" : "保险项目用户需求说明书, element_pos=90",
+    "status" : "done"
+  } ]
+}

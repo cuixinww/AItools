@@ -1,9 +1,13 @@
 package com.dg.tools.extractor.model;
 
 import lombok.AllArgsConstructor;
-import lombok.Data;
+import lombok.EqualsAndHashCode;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.ToString;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -24,7 +28,10 @@ import java.util.List;
  * @see AbstractHandler#doUnpack
  * @see RecursiveExtractor.Session
  */
-@Data
+@Getter
+@Setter
+@ToString
+@EqualsAndHashCode
 @AllArgsConstructor
 public class ExtractionResult {
 
@@ -48,6 +55,31 @@ public class ExtractionResult {
 
     /** 解析过程中的非致命错误列表，不影响结果判定但需记录。 */
     private List<String> errors;
+
+    /** 返回不可变的元素列表视图。 */
+    public List<Element> getElements() {
+        return elements == null ? Collections.emptyList() : Collections.unmodifiableList(elements);
+    }
+
+    /** 返回不可变的内嵌文件列表视图。 */
+    public List<EmbeddedFile> getEmbeddedFiles() {
+        return embeddedFiles == null ? Collections.emptyList() : Collections.unmodifiableList(embeddedFiles);
+    }
+
+    /** 返回不可变的图片列表视图。 */
+    public List<ImageFile> getImages() {
+        return images == null ? Collections.emptyList() : Collections.unmodifiableList(images);
+    }
+
+    /** 返回不可变的大表信息列表视图。 */
+    public List<LargeTableInfo> getLargeTables() {
+        return largeTables == null ? Collections.emptyList() : Collections.unmodifiableList(largeTables);
+    }
+
+    /** 返回不可变的错误列表视图。 */
+    public List<String> getErrors() {
+        return errors == null ? Collections.emptyList() : Collections.unmodifiableList(errors);
+    }
 
     /**
      * 工厂方法：创建一个指定文件类型的空 ExtractionResult。
@@ -78,7 +110,7 @@ public class ExtractionResult {
     /** 记录一条非致命错误信息。错误不会中断提取流程，但会在 manifest.json 中体现。 */
     public void addError(String err) { if (errors == null) errors = new ArrayList<>(); errors.add(err); }
 
-    // ==================== Setter 扩展（Lombok @Data 未生成） ====================
+    // ==================== Setter 扩展（Lombok @Setter 覆盖） ====================
 
     /** 替换全部内容为新列表。先清空当前元素，再addAll新数据（允许 null 安全）。 */
     public void setElements(List<Element> elements) { this.elements.clear(); if (elements != null) this.elements.addAll(elements); }

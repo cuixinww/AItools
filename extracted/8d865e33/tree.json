@@ -1,0 +1,18 @@
+{
+  "_comment" : "文档层级树，供AI直接消费。—— roots: 根文档列表。每个节点字段：seq=序号, name=目录名, type=文档类型(docx/xlsx/pdf等), status=处理状态, element_count=元素总数, element_pos_in_parent=在父文档body.md中的元素POS号, children=子文档列表",
+  "roots" : [ {
+    "seq" : 0,
+    "name" : "保险项目用户需求说明书",
+    "type" : "docx",
+    "status" : "done",
+    "element_count" : 185,
+    "children" : [ {
+      "seq" : 1,
+      "name" : "Ole10Native_CIT_F065_AI-BAU_",
+      "type" : "pdf",
+      "status" : "done",
+      "element_count" : 13,
+      "element_pos_in_parent" : 90
+    } ]
+  } ]
+}

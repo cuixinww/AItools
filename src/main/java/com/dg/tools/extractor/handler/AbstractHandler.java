@@ -2,6 +2,7 @@ package com.dg.tools.extractor.handler;
 
 import com.dg.tools.extractor.model.ExtractionResult;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.lang.Nullable;
 
 import java.io.InputStream;
 
@@ -47,10 +48,10 @@ public abstract class AbstractHandler {
      * 判断当前 Handler 是否支持指定文件名的文档类型。
      * 由子类根据支持的扩展名实现。
      *
-     * @param fileName 文件名
+     * @param fileName 文件名，可为 null（此时返回 false）
      * @return true 如果此 Handler 可以处理该文件
      */
-    public abstract boolean supports(String fileName);
+    public abstract boolean supports(@Nullable String fileName);
 
     /**
      * Phase 1：拆包 — 提取文档中的内嵌文件和图片（不解析文本内容）。

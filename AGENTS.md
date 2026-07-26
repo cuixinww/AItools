@@ -84,7 +84,7 @@ src/main/java/com/dg/tools/extractor/
 ### 2.4 向后兼容原则
 - Java 17 是唯一目标版本，不使用 21+ 特性（Record密封类、Pattern Matching for switch 高级用法、虚拟线程等）。
 - 依赖版本锁定：POI 5.3.0 / PDFBox 3.0.2 / Tika 2.9.2，升级需评估兼容性影响。
-- Handler 接口 `DocumentHandler` 是公共 API，新增方法必须加 default 实现。
+- Handler 基类 `AbstractHandler` 是公共 API，提供模板方法（doExtract/doUnpack）和统一异常处理。
 
 ---
 
@@ -94,7 +94,7 @@ src/main/java/com/dg/tools/extractor/
 | 类型 | 规则 | 示例 |
 |------|------|------|
 | 类名 | PascalCase | `DocxHandler`, `MergeCellResolver` |
-| 接口名 | PascalCase (形容词性最佳) | `DocumentHandler` |
+| 接口名 | PascalCase (形容词性最佳) | `TriageProcessor`（可插拔过滤接口） |
 | 方法名 | camelCase (动宾结构) | `extract()`, `unpack()`, `split()` |
 | 常量 | UPPER_SNAKE_CASE | `CHUNK_SIZE`, `MAX_DEPTH` |
 | 私有字段 | camelCase (无下划线前缀) | `session`, `handlers` |
@@ -206,8 +206,8 @@ Step 7: 回归检查          ← 确认没有影响其他模块
 
 ### 5.2 新增 Handler 流程
 当需要添加新文件格式支持时：
-1. 在 `DocumentHandler` 接口确认签名（不可变）
-2. 新建 `XxxHandler.java` 实现 `DocumentHandler`
+1. 继承 `AbstractHandler` 抽象基类，确认模板方法签名（不可变）
+2. 新建 `XxxHandler.java` 继承 `AbstractHandler`
 3. 实现 `supports(String)` — 匹配扩展名
 4. 实现 `extract(InputStream, String)` — Phase 2 解析
 5. 实现 `unpack(InputStream, String)` — Phase 1 拆包（默认实现可用）

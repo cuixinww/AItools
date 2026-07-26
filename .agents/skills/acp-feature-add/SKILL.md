@@ -1,6 +1,6 @@
 ﻿---
 name: acp-feature-add-dgtools
-description: Use when the user asks to add a new feature, such as a new DocumentHandler implementation, new extraction capability (e.g., TriageProcessor, ImageDescriber), or extend existing functionality with new behavior. Forces a plan-before-code loop, scoping non-goals, and verifying the new behavior end-to-end. Adapted for dg-tools Java/Spring Boot project.
+description: Use when the user asks to add a new feature, such as a new AbstractHandler subclass, new extraction capability (e.g., TriageProcessor, ImageDescriber), or extend existing functionality with new behavior. Forces a plan-before-code loop, scoping non-goals, and verifying the new behavior end-to-end. Adapted for dg-tools Java/Spring Boot project.
 version: 1.0.0
 ---
 
@@ -113,7 +113,7 @@ Risks:
 
 Stop and ask for confirmation if:
 
-- The feature touches the `DocumentHandler` interface signature.
+- The feature touches the `AbstractHandler` base class signature.
 - The feature requires changing public API data models (`ExtractionResult`, `Element`).
 - The plan grows beyond the user's stated scope.
 - The implementation requires a new framework or major Maven dependency.

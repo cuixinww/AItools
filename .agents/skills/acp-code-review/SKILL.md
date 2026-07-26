@@ -64,6 +64,6 @@ Verification gaps: - ...
 Be extra careful when the diff contains:
 - Large unrelated handler rewrites
 - New abstractions for small tasks
-- Changed DocumentHandler.java interface without updating callers
+- Changed AbstractHandler.java base class without updating callers
 - Tests that only verify implementation details
 - Confident summaries with no test evidence

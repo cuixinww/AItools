@@ -86,8 +86,25 @@ class TypeDetectorTest {
     void detectMimeTypeDocx() throws Exception {
         Path docxPath = Path.of("doc/CIT_F065_用户需求说明书_AI-BAU需求管控工具.docx");
         byte[] data = Files.readAllBytes(docxPath);
+        // OOXML 类型仅凭魔数字节无法区分 docx/xlsx/pptx，Tika 返回通用 x-tika-ooxml
         assertThat(detector.detectMimeType(data))
-                .isEqualTo("application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+                .isEqualTo("application/x-tika-ooxml");
+    }
+
+    @Test
+    void detectExtensionDocx() throws Exception {
+        Path docxPath = Path.of("doc/CIT_F065_用户需求说明书_AI-BAU需求管控工具.docx");
+        byte[] data = Files.readAllBytes(docxPath);
+        // detectExtension 应回退到文件名后缀
+        assertThat(detector.detectExtension(data, "test.docx")).isEqualTo("docx");
+    }
+
+    @Test
+    void detectExtensionXlsx() throws Exception {
+        Path xlsxPath = Path.of("doc/保险理赔需求设计.xlsx");
+        byte[] data = Files.readAllBytes(xlsxPath);
+        // xlsx 也是 OOXML zip，应回退到文件名后缀
+        assertThat(detector.detectExtension(data, "test.xlsx")).isEqualTo("xlsx");
     }
 
     @Test

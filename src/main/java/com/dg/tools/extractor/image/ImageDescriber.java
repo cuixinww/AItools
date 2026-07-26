@@ -1,5 +1,7 @@
 package com.dg.tools.extractor.image;
 
+import org.springframework.lang.Nullable;
+
 /**
  * 图片描述器（Phase 1.5 IMAGE 阶段）。
  *
@@ -20,9 +22,10 @@ public interface ImageDescriber {
     /**
      * 对指定图片做视觉理解并返回结构化描述。
      *
-     * @param imageData 图片原始字节
-     * @param format    图片格式（"png"/"jpg"/"gif" 等）
+     * @param imageData 图片原始字节（null 会由调用方防御）
+     * @param format    图片格式，如 "png"/"jpg"/"gif"
      * @return 图片描述对象；失败或尚未接入模型时返回 null
      */
-    ImageDescription describe(byte[] imageData, String format);
+    @Nullable
+    ImageDescription describe(@Nullable byte[] imageData, String format);
 }

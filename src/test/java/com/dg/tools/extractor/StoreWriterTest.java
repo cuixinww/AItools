@@ -203,8 +203,8 @@ class StoreWriterTest {
                 new StoreWriter.DocInfo(1, "doc1", "f.txt", "f.txt", "txt",
                         "root", "filtered")
         );
-        docs.get(0).filterReason = "too small";
-        docs.get(0).filterConfidence = 0.95;
+        docs.get(0).setFilterReason("too small");
+        docs.get(0).setFilterConfidence(0.95);
         String json = StoreWriter.buildManifestJson("s-3", "parent.docx", docs);
         assertThat(json).contains("filtered");
         assertThat(json).contains("too small");

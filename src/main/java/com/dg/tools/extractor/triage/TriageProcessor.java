@@ -1,5 +1,7 @@
 package com.dg.tools.extractor.triage;
 
+import org.springframework.lang.Nullable;
+
 /**
  * 文档相关性判定器（Phase 1.5 TRIAGE 阶段）。
  *
@@ -20,9 +22,9 @@ public interface TriageProcessor {
     /**
      * 判定指定文档是否与当前用户需求相关。
      *
-     * @param fileData 文档的原始字节数据
-     * @param fileName 文档文件名
-     * @return 相关性判定结果
+     * @param fileData 文档的原始字节数据（null 会由调用方防御）
+     * @param fileName 文档文件名（null 会由调用方防御）
+     * @return 相关性判定结果；调用异常时返回默认 RELEVANT（保守放行）
      */
-    RelevanceAssessment assess(byte[] fileData, String fileName);
+    RelevanceAssessment assess(@Nullable byte[] fileData, @Nullable String fileName);
 }

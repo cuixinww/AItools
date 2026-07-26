@@ -1,0 +1,43 @@
+{
+  "source" : "保险项目用户需求说明书/保险项目用户需求说明书.md",
+  "total_elements" : 185,
+  "total_large_tables" : 0,
+  "total_images" : 2,
+  "chunk_size" : 0,
+  "chunk_mode" : "heading",
+  "approximate_tokens" : 4084,
+  "chunks" : [ {
+    "file" : "chunk_0001.md",
+    "pos_range" : [ 3, 49 ],
+    "element_count" : 47,
+    "approximate_tokens" : 910,
+    "heading_level" : 1,
+    "heading_text" : "目    录",
+    "includes_large_table" : false
+  }, {
+    "file" : "chunk_0002.md",
+    "pos_range" : [ 50, 86 ],
+    "element_count" : 37,
+    "approximate_tokens" : 811,
+    "heading_level" : 1,
+    "heading_text" : "第 1 章   项目概述",
+    "includes_large_table" : false
+  }, {
+    "file" : "chunk_0003.md",
+    "pos_range" : [ 87, 145 ],
+    "element_count" : 59,
+    "approximate_tokens" : 1306,
+    "heading_level" : 1,
+    "heading_text" : "第 3 章   功能需求",
+    "includes_large_table" : false
+  }, {
+    "file" : "chunk_0004.md",
+    "pos_range" : [ 146, 184 ],
+    "element_count" : 39,
+    "approximate_tokens" : 1002,
+    "heading_level" : 1,
+    "heading_text" : "第 6 章   数据备份需求",
+    "includes_large_table" : false
+  } ],
+  "large_tables" : [ ]
+}

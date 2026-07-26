@@ -25,7 +25,7 @@ Do not refactor just because code looks old or ugly.
 
 ### 2. Preserve Behavior
 Public behavior must remain unchanged unless explicitly asked for a behavior change.
-- `DocumentHandler` interface contract is immutable for refactor scope.
+- `AbstractHandler` base class contract is immutable for refactor scope.
 - `ExtractionResult` output format must be preserved.
 - `manifest.json` structure must not change.
 

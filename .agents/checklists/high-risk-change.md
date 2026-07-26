@@ -9,7 +9,7 @@
 
 本项目的高风险变更包括：
 
-- [ ] 修改 `DocumentHandler.java` 接口签名
+- [ ] 修改 `AbstractHandler.java` 基类契约
 - [ ] 修改 `ExtractionResult` / `Element` / `UnpackResult` 数据模型
 - [ ] 修改 `RecursiveExtractor.java` 核心调度逻辑
 - [ ] 影响内存安全原则（如引入整包加载）

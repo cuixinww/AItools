@@ -1,8 +1,12 @@
 package com.dg.tools.extractor.util;
 
+import java.io.BufferedWriter;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.StringJoiner;
 
@@ -14,6 +18,19 @@ import java.util.StringJoiner;
 public final class StringUtils {
 
     private StringUtils() {}
+
+    /**
+     * 创建一个写入 UTF-8 BOM 的 BufferedWriter。
+     * Excel 打开 CSV 时依赖 BOM 识别 UTF-8 编码，否则中文会显示乱码。
+     *
+     * @param file 目标文件路径
+     * @return BufferedWriter（已写入 BOM）
+     */
+    public static BufferedWriter newBomWriter(Path file) throws IOException {
+        BufferedWriter bw = Files.newBufferedWriter(file, StandardCharsets.UTF_8);
+        bw.write('\uFEFF');
+        return bw;
+    }
 
     /**
      * 从输入流读取全部字节到 byte[]。

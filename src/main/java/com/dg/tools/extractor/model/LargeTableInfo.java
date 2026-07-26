@@ -1,9 +1,13 @@
 package com.dg.tools.extractor.model;
 
 import lombok.AllArgsConstructor;
-import lombok.Data;
+import lombok.EqualsAndHashCode;
+import lombok.Getter;
 import lombok.NoArgsConstructor;
+import lombok.Setter;
+import lombok.ToString;
 
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -20,7 +24,10 @@ import java.util.List;
  * @see StoreWriter#writeLargeTables
  * @see CsvSlicer
  */
-@Data
+@Getter
+@Setter
+@ToString
+@EqualsAndHashCode
 @NoArgsConstructor
 @AllArgsConstructor
 public class LargeTableInfo {
@@ -42,6 +49,11 @@ public class LargeTableInfo {
 
     /** 全部行数据（含表头），供 writeLargeTables 逐行写出 CSV。写出后应调用 clearRows() 释放。 */
     private List<List<String>> allRows;
+
+    /** 返回不可变的全部行数据视图。 */
+    public List<List<String>> getAllRows() {
+        return allRows == null ? Collections.emptyList() : Collections.unmodifiableList(allRows);
+    }
 
     /**
      * CSV 写出后调用，释放 allRows 引用允许 GC 回收。

@@ -43,10 +43,10 @@
 |------|------|---------|---------|---------|
 | **低风险** | 新增内部工具类、补充测试、文档更新 | 直接实现 | 可选 | 可选 |
 | **中风险** | 修改现有 Handler 逻辑、新增 Excel/PDF 处理分支 | 协助实现 | 推荐 | 可选 |
-| **高风险** | 修改 DocumentHandler 接口契约、改变提取输出结构、内存隔离相关改动 | 仅辅助 | **强制** | **必需** |
+| **高风险** | 修改 AbstractHandler 基类契约、改变提取输出结构、内存隔离相关改动 | 仅辅助 | **强制** | **必需** |
 
 高风险判定条件（满足其一即可）：
-- 触及 `DocumentHandler.java` 接口签名变更
+- 触及 `AbstractHandler.java` 基类签名变更
 - 改变 `ExtractionResult` / `Element` 数据模型结构
 - 修改 `RecursiveExtractor` 核心调度逻辑
 - 影响内存安全原则（如整包加载）
@@ -73,7 +73,7 @@
 - 可修改: model/Element.java 新增 EMBEDDED_TABLE 枚举值
 
 ## Do Not Change
-- 不修改 DocumentHandler.java 接口
+- 不修改 AbstractHandler.java 基类
 - 不改变 extract() 方法的 InputStream 签名
 - 不引入新的第三方依赖
 

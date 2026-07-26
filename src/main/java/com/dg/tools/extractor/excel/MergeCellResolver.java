@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * 合并单元格填充器。
@@ -39,7 +40,27 @@ public class MergeCellResolver {
     private MergeCellResolver() {}
 
     /**
-     * 读取一个 Sheet 的全部行，填充合并单元格值并做列数归一化。
+     * Sheet 数据容器，包含两个不同填充程度的网格。
+     * <ul>
+     *   <li>{@link #filled} — 合并区域值已向下方+右方铺满，用于 RegionSplitter 和 CSV 输出</li>
+     *   <li>{@link #compact} — 仅做列数归一化（不填充合并区域），用于 Markdown 渲染和大小表阈值判断</li>
+     * </ul>
+     */
+    public record SheetData(List<List<String>> filled, List<List<String>> compact) {}
+
+    /**
+     * 读取一个 Sheet 的全部行，返回填充合并单元格后的矩形数据。
+     * 向下兼容，等价于调用 {@code readRowsWithMeta(sheet).filled()}。
+     *
+     * @param sheet 待处理的 Sheet
+     * @return 完全填充后的矩形行数据（每行长度一致）
+     */
+    public static List<List<String>> readRows(Sheet sheet) {
+        return readRowsWithMeta(sheet).filled();
+    }
+
+    /**
+     * 读取一个 Sheet 的全部行，返回填充合并单元格后的矩形数据。
      * FormulaEvaluator 在整个 readRows 调用中只创建一次、复用，
      * 避免每个公式单元格都 new 一个 evaluator。
      *
@@ -48,13 +69,15 @@ public class MergeCellResolver {
      *   <li>第一遍：遍历所有行，读取已有单元格值，记录最大列数</li>
      *   <li>扫描合并区域，计算可能的最大列数（合并可能延伸到已有数据右侧）</li>
      *   <li>预缓存每个合并区域的源值（区域左上角单元格），避免重复读取</li>
-     *   <li>第二遍：补齐每行列数，将合并区域的源值填充到空白单元格</li>
+     *   <li>第二遍：补齐每行列数（此时构造 compact 网格——不填充合并区域）</li>
+     *   <li>第三遍：将合并区域的值铺满到空白单元格（构造 filled 网格——供 CSV 使用）</li>
      * </ol>
      *
      * @param sheet 待处理的 Sheet
-     * @return 完全填充后的矩形行数据（每行长度一致）
+     * @return 包含 filled 和 compact 双网格的 {@link SheetData}
      */
-    public static List<List<String>> readRows(Sheet sheet) {
+    public static SheetData readRowsWithMeta(Sheet sheet) {
+        Objects.requireNonNull(sheet, "sheet must not be null");
         List<CellRangeAddress> mergedRegions = sheet.getMergedRegions();
 
         // 每个 readRows 调用创建一次 DataFormatter 和 FormulaEvaluator，整个生命周期内复用
@@ -90,38 +113,42 @@ public class MergeCellResolver {
             }
         }
 
-        // ========== 第二遍：补齐列数，并把合并区域的值铺满到空白单元格 ==========
+        // ========== 第二遍：补齐列数（compact 网格——不填充合并区域） ==========
         for (RowData rd : rows) {
-            // 补齐到统一宽度
             while (rd.data.size() < maxCols) {
                 rd.data.add("");
             }
+        }
 
-            // 遍历合并区域，对与本行相交的区域填充源值
+        // 保存 compact 网格（归一化但未填充合并区域的副本）
+        List<List<String>> compact = new ArrayList<>();
+        for (RowData rd : rows) {
+            compact.add(new ArrayList<>(rd.data));
+        }
+
+        // ========== 第三遍：把合并区域的值铺满到空白单元格（filled 网格——供 CSV 输出使用） ==========
+        for (RowData rd : rows) {
             for (CellRangeAddress region : mergedRegions) {
-                // 仅处理与本行相交的合并区域（跳过不在该区域行范围内的合并块）
                 if (rd.rowNum < region.getFirstRow() || rd.rowNum > region.getLastRow()) {
                     continue;
                 }
                 String sourceValue = regionValues.get(region);
                 if (sourceValue == null) continue;
 
-                // 在列维度上填充：跳过合并源单元格本身（保留原值）
                 for (int col = region.getFirstColumn(); col <= region.getLastColumn() && col < maxCols; col++) {
                     if (rd.rowNum == region.getFirstRow() && col == region.getFirstColumn()) continue;
-                    String value = rd.data.get(col);
-                    if (value.isEmpty()) {
+                    if (rd.data.get(col).isEmpty()) {
                         rd.data.set(col, sourceValue);
                     }
                 }
             }
         }
 
-        List<List<String>> result = new ArrayList<>();
+        List<List<String>> filled = new ArrayList<>();
         for (RowData rd : rows) {
-            result.add(rd.data);
+            filled.add(rd.data);
         }
-        return result;
+        return new SheetData(filled, compact);
     }
 
     // ==================== 单元格取值 ====================

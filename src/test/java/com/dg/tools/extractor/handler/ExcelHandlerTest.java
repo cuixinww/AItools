@@ -39,13 +39,13 @@ class ExcelHandlerTest {
 
     @Test
     void shouldHandleLargeTableAsDataRef() throws Exception {
-        byte[] xlsx = TestFileFactory.createLargeExcel("LargeSheet", 60, 5);
+        byte[] xlsx = TestFileFactory.createLargeExcel("LargeSheet", 110, 5);
         ExtractionResult result = handler.extract(TestFileFactory.toInputStream(xlsx), "large.xlsx");
 
         assertThat(result.getLargeTables()).isNotEmpty();
         LargeTableInfo lti = result.getLargeTables().get(0);
-        assertThat(lti.getRowCount()).isEqualTo(60);
-        assertThat(lti.getAllRows()).hasSize(60);
+        assertThat(lti.getRowCount()).isEqualTo(110);
+        assertThat(lti.getAllRows()).hasSize(110);
     }
 
     @Test

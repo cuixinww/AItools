@@ -56,23 +56,25 @@ try {
 ## 本项目特殊规则
 
 ### Handler 实现模板
-当生成新的 DocumentHandler 实现时：
+当生成新的 Handler 实现时：
 ```java
-public class XxxHandler implements DocumentHandler {
+@Component
+@Slf4j
+public class XxxHandler extends AbstractHandler {
     @Override
     public boolean supports(String fileName) { ... }
 
     @Override
-    public UnpackResult unpack(InputStream is, String fileName) { ... }
+    protected ExtractionResult doUnpack(InputStream is, String fileName) throws Exception { ... }
 
     @Override
-    public ExtractionResult extract(InputStream is, String fileName) { ... }
+    protected ExtractionResult doExtract(InputStream is, String fileName) throws Exception { ... }
 }
 ```
 
 ### 文件修改安全
 - **不要**删除 `src/main/java` 下的已有文件。
-- **不要**修改 `DocumentHandler.java` 接口签名（如需新增方法必须加 default）。
+- **不要**修改 `AbstractHandler.java` 基类模板方法签名。
 - **可以**在 `pom.xml` 中添加新依赖（需说明理由）。
 - **不要**修改 `target/`、`extracted_output/` 等生成目录内容。
 

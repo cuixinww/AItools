@@ -114,7 +114,7 @@ public class CsvSlicer {
             int end = Math.min(start + CHUNK_SIZE, allRows.size());
             Path chunkFile = sliceDir.resolve(String.format("chunk_%04d.csv", i + 1));
 
-            try (BufferedWriter bw = Files.newBufferedWriter(chunkFile, StandardCharsets.UTF_8)) {
+            try (BufferedWriter bw = StringUtils.newBomWriter(chunkFile)) {
                 for (int r = start; r < end; r++) {
                     bw.write(StringUtils.toCsvLine(allRows.get(r)));
                     bw.newLine();

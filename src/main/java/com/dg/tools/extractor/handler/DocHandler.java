@@ -1,5 +1,6 @@
 package com.dg.tools.extractor.handler;
 
+import com.dg.tools.extractor.OleExtractor;
 import com.dg.tools.extractor.model.*;
 import com.dg.tools.extractor.util.StringUtils;
 import lombok.extern.slf4j.Slf4j;
@@ -8,14 +9,17 @@ import org.apache.poi.hwpf.model.PicturesTable;
 import org.apache.poi.hwpf.model.StyleDescription;
 import org.apache.poi.hwpf.model.StyleSheet;
 import org.apache.poi.hwpf.usermodel.*;
+import org.apache.poi.poifs.filesystem.DirectoryNode;
+import org.apache.poi.poifs.filesystem.DocumentInputStream;
+import org.apache.poi.poifs.filesystem.DocumentNode;
+import org.apache.poi.poifs.filesystem.Entry;
 import org.springframework.stereotype.Component;
 
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.Arrays;
 
 /**
  * DOC 文档处理器（.doc, Word 97-2003 OLE2 格式）。
@@ -52,19 +56,17 @@ public class DocHandler extends AbstractHandler {
     // ==================== 阶段 1：UNPACK（仅图片） ====================
 
     /**
-     * Phase 1 拆包：仅提取图片，不解析文本，实现轻量级操作。
-     * OLE 嵌入对象通过 Phase 2 完整处理；.doc 本身就是 OLE2 容器，
-     * 嵌入对象在 Phase 2 extractRangeContent 中可被 OleExtractor 解出。
+     * Phase 1 拆包：提取图片 + OLE 嵌入对象。
+     * OLE 对象通过 OleExtractor 从 POIFS ObjectPool 中解出真实文件。
      */
     @Override
     protected ExtractionResult doUnpack(InputStream is, String fileName) throws Exception {
         ExtractionResult unpacked = ExtractionResult.of("doc", fileName);
-        int position = 0;
 
         try (HWPFDocument doc = new HWPFDocument(is)) {
-            // 仅提取图片（轻量级，不解析文本）
+            int position = 0;
             position += unpackImages(doc, unpacked, position);
-            // OLE 嵌入对象通过 Phase 2 完整处理
+            unpackOleEmbeddings(doc, unpacked);
         } catch (Exception e) {
             log.error("Failed to unpack doc: {}", fileName, e);
             unpacked.addError("unpack error: " + e.getMessage());
@@ -99,8 +101,8 @@ public class DocHandler extends AbstractHandler {
     // ==================== 阶段 2：EXTRACT（完整解析） ====================
 
     /**
-     * Phase 2 完整解析：按顺序处理页眉 → 正文（段落+表格）→ 图片。
-     * 使用 StyleSheet 进行标题级别检测。
+     * Phase 2 完整解析：按顺序处理页眉 → 正文（段落+表格）→ OLE 嵌入 → 图片。
+      * 使用 StyleSheet 进行标题级别检测，通过 POIFS ObjectPool 提取 OLE 嵌入。
      */
     @Override
     protected ExtractionResult doExtract(InputStream is, String fileName) throws Exception {
@@ -108,19 +110,19 @@ public class DocHandler extends AbstractHandler {
         int position = 0;
 
         try (HWPFDocument doc = new HWPFDocument(is)) {
-            // 获取样式表（用于标题检测）
             StyleSheet styleSheet = doc.getStyleSheet();
 
-            // 处理页眉
             position += extractHeaderStory(doc, result, position, styleSheet);
 
-            // 处理正文：按 Range 遍历段落和表格
             Range range = doc.getRange();
             if (range != null) {
                 position = extractRangeContent(range, result, position, styleSheet);
             }
 
-            // 提取图片（生成 TYPE: image Element，含 media/ 引用）
+            // OLE 嵌入对象（排在正文后、图片前，从 POIFS ObjectPool 提取）
+            position += extractOleEmbeddings(doc, result, position);
+
+            // 图片
             position = extractImages(doc, result, position);
 
         } catch (Exception e) {
@@ -328,6 +330,81 @@ public class DocHandler extends AbstractHandler {
             }
         }
         return sb.toString();
+    }
+
+    // ==================== OLE 嵌入对象提取 ====================
+
+    /**
+     * Phase 1：从 POIFS ObjectPool 提取 OLE 嵌入文件。
+     * 遍历 ObjectPool 目录下每个 DocumentNode，通过 OleExtractor 解出真实文件。
+     */
+    private void unpackOleEmbeddings(HWPFDocument doc, ExtractionResult result) {
+        Map<String, byte[]> oleFiles = extractOleFromObjectPool(doc);
+        int pos = result.getEmbeddedFiles().size();
+        for (var entry : oleFiles.entrySet()) {
+            result.addEmbedded(new EmbeddedFile(entry.getKey(), pos++, entry.getValue()));
+        }
+    }
+
+    /**
+     * Phase 2：提取 OLE 嵌入文件 + 在 element 列表末尾添加 embed Element。
+     * HWPF 不提供 OLE 对象到段落的直接映射，无法精确插入到文档原位，
+     * 因此 embed Element 排列在正文之后、图片之前。
+     */
+    private int extractOleEmbeddings(HWPFDocument doc, ExtractionResult result, int position) {
+        Map<String, byte[]> oleFiles = extractOleFromObjectPool(doc);
+        if (oleFiles.isEmpty()) return 0;
+        int pos = position;
+        for (var entry : oleFiles.entrySet()) {
+            result.addEmbedded(new EmbeddedFile(entry.getKey(), pos, entry.getValue()));
+            result.addElement(new Element(pos, "embed", null, "file: " + entry.getKey()));
+            pos++;
+        }
+        return oleFiles.size();
+    }
+
+    /**
+     * 从 HWPFDocument 的 POIFS ObjectPool 中提取所有 OLE 嵌入文件。
+     * 遍历 ObjectPool 下每个 DocumentNode，通过 OleExtractor 解出真实文件。
+     */
+    private Map<String, byte[]> extractOleFromObjectPool(HWPFDocument doc) {
+        Map<String, byte[]> result = new LinkedHashMap<>();
+        try {
+            DirectoryNode root = doc.getDirectory();
+            if (root == null) return result;
+            Entry poolEntry = root.getEntry("ObjectPool");
+            if (poolEntry instanceof DirectoryNode objectPool) {
+                for (Entry entry : objectPool) {
+                    if (entry instanceof DocumentNode docNode) {
+                        try (DocumentInputStream dis = new DocumentInputStream(docNode)) {
+                            long avail = docNode.getSize();
+                            if (avail > 100 * 1024 * 1024) { // 100 MB 限制
+                                log.warn("OLE object too large in .doc: {} ({} bytes)", docNode.getName(), avail);
+                                continue;
+                            }
+                            byte[] oleBytes = dis.readAllBytes();
+                            Map<String, byte[]> extracted = OleExtractor.extract(oleBytes);
+                            if (!extracted.isEmpty()) {
+                                int idx = 0;
+                                for (var ex : extracted.entrySet()) {
+                                    String key = ex.getKey();
+                                    while (result.containsKey(key)) {
+                                        key = idx + "_" + ex.getKey();
+                                    }
+                                    result.put(key, ex.getValue());
+                                    idx++;
+                                }
+                            } else if (oleBytes.length > 0) {
+                                result.put(docNode.getName(), oleBytes);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.debug("No ObjectPool or no OLE entries in .doc: {}", e.getMessage());
+        }
+        return result;
     }
 
     // ==================== 图片提取 ====================

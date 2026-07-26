@@ -116,7 +116,7 @@ Risk:
 
 Stop and ask for human confirmation if the bug fix touches:
 
-- `DocumentHandler.java` 接口签名变更
+- `AbstractHandler.java` 基类契约变更
 - `ExtractionResult` / `Element` 数据模型变更
 - `RecursiveExtractor.java` 核心调度逻辑
 - 内存隔离相关改动（如整包加载）

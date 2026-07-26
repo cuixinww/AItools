@@ -11,6 +11,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.StringJoiner;
 import java.util.stream.Collectors;
@@ -22,7 +23,7 @@ import java.util.stream.Collectors;
  * <ul>
  *   <li>合并单元格填充：{@link MergeCellResolver} 将合并区域值向下方+右方铺满</li>
  *   <li>多区域切分：{@link RegionSplitter} 按连续空列≥2 切分为独立数据区域</li>
- *   <li>大小表分流：小表（≤50行且≤10列）→ Markdown 内联；大表 → data_ref + CSV 分离到 data/</li>
+ *   <li>大小表分流：小表（≤100行且≤10列）→ Markdown 内联；大表 → data_ref + CSV 分离到 data/</li>
  *   <li>CSV 切片：大表行数 >500 时由 CsvSlicer 切为 100行/块</li>
  * </ul>
  *
@@ -37,7 +38,7 @@ import java.util.stream.Collectors;
 @Slf4j
 public class ExcelHandler extends AbstractHandler {
 
-    /** 大表判定阈值：最大行数（超出则走 data_ref 路径）。默认 50 行。 */
+    /** 大表判定阈值：最大行数（超出则走 data_ref 路径）。默认 100 行。 */
     private final int largeTableThreshold;
 
     /** 大表判定阈值：最大列数（超出则走 data_ref 路径）。默认 10 列。 */
@@ -45,7 +46,7 @@ public class ExcelHandler extends AbstractHandler {
 
     /** 无参构造函数：使用默认阈值常量。被 Spring 忽略，仅作安全回退。 */
     public ExcelHandler() {
-        this.largeTableThreshold = 50;
+        this.largeTableThreshold = 100;
         this.columnThreshold = 10;
     }
 
@@ -56,7 +57,7 @@ public class ExcelHandler extends AbstractHandler {
      */
     @Autowired
     public ExcelHandler(
-            @Value("${extractor.excel.large-table-threshold:50}") int largeTableThreshold,
+            @Value("${extractor.excel.large-table-threshold:100}") int largeTableThreshold,
             @Value("${extractor.excel.column-threshold:10}") int columnThreshold) {
         this.largeTableThreshold = largeTableThreshold;
         this.columnThreshold = columnThreshold;
@@ -121,16 +122,16 @@ public class ExcelHandler extends AbstractHandler {
                 Sheet sheet = wb.getSheetAt(s);
                 String sheetName = sheet.getSheetName();
 
-                // 合并单元格填充 + 列数归一化 → 矩形化二维列表
-                List<List<String>> allRows = MergeCellResolver.readRows(sheet);
+                // 合并单元格填充 + 列数归一化 → 矩形化二维列表（含 filled / compact 双网格）
+                var sheetData = MergeCellResolver.readRowsWithMeta(sheet);
+                List<List<String>> allRows = sheetData.filled();
                 if (allRows.isEmpty()) continue;
 
-                // 按连续空列 ≥2 切分为多个独立数据区域
+                // 按连续空列 ≥2 切分为多个独立数据区域（使用 filled 网格保证列填充率准确）
                 List<Region> regions = RegionSplitter.split(allRows);
                 for (int ri = 0; ri < regions.size(); ri++) {
                     Region region = regions.get(ri);
-                    List<List<String>> regionRows = region.rows;
-                    if (regionRows.isEmpty()) continue;
+                    if (region.rows.isEmpty()) continue;
 
                     // 输出 Sheet/Region 标签
                     String label = regions.size() > 1
@@ -138,41 +139,55 @@ public class ExcelHandler extends AbstractHandler {
                             : "[Sheet: " + sheetName + "]";
                     result.addElement(new Element(position++, "sheet_header", label));
 
-                    // 智能定位表头行索引
-                    int headerIdx = findHeaderRowIndex(regionRows);
-                    List<String> headerRow = regionRows.get(headerIdx);
-                    // tableRows 包含表头行及其下方所有数据行
-                    List<List<String>> tableRows = regionRows.subList(headerIdx, regionRows.size());
+                    // 从 compact 网格中提取对应区域（不包含合并填充值，用于 Markdown + 阈值判断）
+                    List<List<String>> compactRows = extractRegionColumns(sheetData.compact(), region);
+                    int headerIdx = findHeaderRowIndex(compactRows);
 
-                    // ========== 大小表分流 ==========
-                    if (tableRows.size() <= largeTableThreshold && headerRow.size() <= columnThreshold) {
-                        // 小表：直接渲染为 Markdown 表格
+                    // 输出 title 行（header 之前的合并/标题行，用 compact 网格避免合并填充重复）
+                    for (int r = 0; r < headerIdx; r++) {
+                        String titleText = compactRows.get(r).stream()
+                                .filter(c -> c != null && !c.trim().isEmpty())
+                                .collect(Collectors.joining(" "));
+                        if (!titleText.trim().isEmpty()) {
+                            result.addElement(new Element(position++, "paragraph", titleText.trim()));
+                        }
+                    }
+
+                    // 从 compact 网格中取表头及数据行
+                    List<String> compactHeader = compactRows.get(headerIdx);
+                    List<List<String>> compactTableRows = compactRows.subList(headerIdx, compactRows.size());
+
+                    // 从 filled 网格中提取对应区域（含合并填充值，用于 CSV 输出）
+                    List<List<String>> filledRows = extractRegionColumns(sheetData.filled(), region);
+                    List<List<String>> filledTableRows = filledRows.subList(headerIdx, filledRows.size());
+
+                    // ========== 大小表分流（阈值判断使用 compact 网格避免虚高） ==========
+                    if (compactTableRows.size() <= largeTableThreshold && compactHeader.size() <= columnThreshold) {
+                        // 小表：使用 compact 网格渲染 Markdown 表格（无合并填充重复）
                         StringBuilder md = new StringBuilder();
-                        for (int r = 0; r < tableRows.size(); r++) {
-                            md.append("| ").append(String.join(" | ", tableRows.get(r))).append(" |\n");
-                            // 第一行为表头 → 插入 Markdown 分隔线
+                        for (int r = 0; r < compactTableRows.size(); r++) {
+                            md.append("| ").append(String.join(" | ", compactTableRows.get(r))).append(" |\n");
                             if (r == 0) {
-                                md.append("| ").append(tableRows.get(r).stream()
+                                md.append("| ").append(compactTableRows.get(r).stream()
                                         .map(c -> "---")
                                         .collect(Collectors.joining(" | "))).append(" |\n");
                             }
                         }
                         result.addElement(new Element(position++, "table", md.toString().trim()));
                     } else {
-                        // 大表 → data_ref + CSV 分离到 data/ 目录
+                        // 大表 → data_ref + CSV（使用 filled 网格保证数据完整性）
                         StringJoiner schema = new StringJoiner(" | ");
-                        for (String cell : headerRow) {
+                        for (String cell : compactHeader) {
                             schema.add(cell != null ? cell.trim() : "");
                         }
 
-                        // 构建预览文本：Columns 行 + 前 2 行数据
                         StringBuilder preview = new StringBuilder();
                         preview.append("Columns: ").append(schema).append("\n");
-                        int previewEnd = Math.min(1 + 2, tableRows.size());
+                        int previewEnd = Math.min(1 + 2, filledTableRows.size());
                         for (int r = 1; r < previewEnd; r++) {
                             preview.append("Row ").append(r).append(": ");
                             StringJoiner rowStr = new StringJoiner(", ");
-                            for (String cell : tableRows.get(r)) {
+                            for (String cell : filledTableRows.get(r)) {
                                 if (cell != null && !cell.trim().isEmpty()) {
                                     rowStr.add(cell.trim());
                                 }
@@ -182,7 +197,7 @@ public class ExcelHandler extends AbstractHandler {
 
                         LargeTableInfo lti = new LargeTableInfo(
                                 sheetName, position++, schema.toString(),
-                                preview.toString().trim(), tableRows.size(), tableRows
+                                preview.toString().trim(), filledTableRows.size(), filledTableRows
                         );
                         result.addLargeTable(lti);
                     }
@@ -240,6 +255,22 @@ public class ExcelHandler extends AbstractHandler {
             if (nonEmpty >= threshold) return i;
         }
         return 0;
+    }
+
+    /**
+     * 从源网格中提取 {@link Region} 对应的列子集。
+     * RegionSplitter 从 filled 网格切分后，compact 网格需按相同列边界提取以保持行列对应。
+     */
+    private static List<List<String>> extractRegionColumns(List<List<String>> source, Region region) {
+        List<List<String>> result = new ArrayList<>();
+        for (List<String> row : source) {
+            List<String> regionRow = new ArrayList<>();
+            for (int col = region.startCol; col <= region.endCol; col++) {
+                regionRow.add(col < row.size() ? row.get(col) : "");
+            }
+            result.add(regionRow);
+        }
+        return result;
     }
 
     // ==================== 工具方法 ====================

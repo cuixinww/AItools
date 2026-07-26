@@ -144,6 +144,10 @@ public class RecursiveExtractor {
         String manifestJson = StoreWriter.buildManifestJson(sessionId, rootDesc, session.docInfoList);
         Files.writeString(sessionDir.resolve("manifest.json"), manifestJson);
 
+        // 写 tree.json（文档层级树，AI 层直接消费）
+        String treeJson = StoreWriter.buildTreeJson(session.docInfoList);
+        Files.writeString(sessionDir.resolve("tree.json"), treeJson);
+
         log.info("Extraction complete — {} root files → output: {}", rootFiles.size(),
                 sessionDir.toAbsolutePath());
         return sessionDir;
@@ -206,6 +210,10 @@ public class RecursiveExtractor {
 
         // Phase 1 UNPACK：使用文件名路由 Handler（因为 unpack 依赖扩展名判断）
         AbstractHandler handler = resolveHandlerByFileName(fileName);
+        // 文件名不匹配时尝试用 detectedExt 路由（如 oleObject1.bin → 实际是 PDF）
+        if (handler == null && detectedExt != null) {
+            handler = resolveHandlerByFileName("dummy." + detectedExt);
+        }
         if (handler == null) {
             log.warn("No handler for: {} (detected as {})", fileName, detectedExt);
             session.addDocInfo(new StoreWriter.DocInfo(
@@ -264,8 +272,8 @@ public class RecursiveExtractor {
         if ("filtered".equals(status)) {
             docInfo = new StoreWriter.DocInfo(seq, sanitizedDirName, fileName,
                     sanitizedDirName + "/" + fileName, detectedExt, parentInfo, "filtered");
-            docInfo.filterReason = filterReason;
-            docInfo.filterConfidence = filterConfidence;
+            docInfo.setFilterReason(filterReason);
+            docInfo.setFilterConfidence(filterConfidence);
         } else {
             docInfo = new StoreWriter.DocInfo(seq, sanitizedDirName, fileName,
                     sanitizedDirName + "/" + fileName, detectedExt, parentInfo, "pending");
@@ -300,6 +308,9 @@ public class RecursiveExtractor {
         Path docDir = session.sessionDir.resolve(StringUtils.sanitizeFileName(entry.dirName));
         try {
             AbstractHandler handler = resolveHandlerByFileName(entry.fileName);
+            if (handler == null && entry.fileType != null) {
+                handler = resolveHandlerByFileName("dummy." + entry.fileType);
+            }
             if (handler == null) {
                 log.warn("No handler for Phase 2: {}", entry.fileName);
                 session.updateDocInfoStatus(entry.seq, "error");
@@ -316,14 +327,14 @@ public class RecursiveExtractor {
                     entry.fileName, entry.parentInfo);
 
             // 写 chunks/（标题感知分块）
-            storeWriter.writeHierarchicalChunks(docDir, entry.dirName, mdFileName, parsed);
+            int chunkCount = storeWriter.writeHierarchicalChunks(docDir, entry.dirName, mdFileName, parsed);
 
             // 写 data/*.csv + CSV 切片
             storeWriter.writeLargeTables(docDir, parsed);
 
-            // 更新 DocInfo 统计（elementCount/dataRefCount/imageCount/status="done"）
+            // 更新 DocInfo 统计（elementCount/dataRefCount/imageCount/chunkCount/status="done"）
             session.updateDocInfo(entry.seq, parsed.getElements().size(),
-                    parsed.getLargeTables().size(), parsed.getImages().size());
+                    parsed.getLargeTables().size(), parsed.getImages().size(), chunkCount);
 
             // 缓存 embed Element 位置映射（供 fixupParentPositions 使用）
             cacheEmbedElementPositions(entry.seq, parsed, session);
@@ -339,6 +350,8 @@ public class RecursiveExtractor {
 
     /**
      * 缓存父文档中 embed 位置映射（供 fixupParentPositions 使用）。
+     * <p>Phase 1 构建 parent 时使用 Sequential index（embed 在列表中的序号 0/1/2...），
+     * Phase 2 解析后 Element.position 是 body.md 中的 POS 号。此方法建立两者的映射。</p>
      */
     private void cacheEmbedElementPositions(int seq, ExtractionResult parsed, Session session) {
         StoreWriter.DocInfo docInfo = null;
@@ -346,9 +359,13 @@ public class RecursiveExtractor {
             if (d.seq == seq) { docInfo = d; break; }
         }
         if (docInfo == null) return;
-        docInfo.embedElementPositions = new LinkedHashMap<>();
+        docInfo.setEmbedElementPositions(new LinkedHashMap<>());
+        int unpackIndex = 0;
+        Map<Integer, Integer> posMap = docInfo.getEmbedElementPositions();
         for (EmbeddedFile emb : parsed.getEmbeddedFiles()) {
-            docInfo.embedElementPositions.put(emb.getPosition(), emb.getPosition());
+            // key = Phase 1 顺序序号，value = Phase 2 Element.position（body.md POS 号）
+            posMap.put(unpackIndex, emb.getPosition());
+            unpackIndex++;
         }
     }
 
@@ -395,7 +412,7 @@ public class RecursiveExtractor {
                 case '\b': sb.append("\\b");  break;
                 case '\f': sb.append("\\f");  break;
                 default:
-                    if (c < 0x20) {
+                    if (c < 0x20 || c == 0x7F) {
                         sb.append(String.format("\\u%04x", (int) c));
                     } else {
                         sb.append(c);
@@ -450,15 +467,16 @@ public class RecursiveExtractor {
         void addDocInfo(StoreWriter.DocInfo info) { docInfoList.add(info); }
 
         /**
-         * Phase 2 完成后更新 DocInfo：回填 elementCount / dataRefCount / imageCount，标记 status="done"。
+         * Phase 2 完成后更新 DocInfo：回填 elementCount / dataRefCount / imageCount / chunkCount，标记 status="done"。
          */
-        void updateDocInfo(int seq, int elementCount, int dataRefCount, int imageCount) {
+        void updateDocInfo(int seq, int elementCount, int dataRefCount, int imageCount, int chunkCount) {
             for (StoreWriter.DocInfo d : docInfoList) {
                 if (d.seq == seq) {
-                    d.elementCount = elementCount;
-                    d.dataRefCount = dataRefCount;
-                    d.imageCount = imageCount;
-                    d.status = "done";
+                    d.setElementCount(elementCount);
+                    d.setDataRefCount(dataRefCount);
+                    d.setImageCount(imageCount);
+                    d.setChunkCount(chunkCount);
+                    d.setStatus("done");
                     return;
                 }
             }
@@ -468,7 +486,7 @@ public class RecursiveExtractor {
         void updateDocInfoStatus(int seq, String status) {
             for (StoreWriter.DocInfo d : docInfoList) {
                 if (d.seq == seq) {
-                    d.status = status;
+                    d.setStatus(status);
                     return;
                 }
             }
@@ -481,8 +499,8 @@ public class RecursiveExtractor {
          */
         void fixupParentPositions() {
             for (StoreWriter.DocInfo d : docInfoList) {
-                if (d.parentInfo == null) continue;
-                String[] parts = d.parentInfo.split(", pos=", 2);
+                if (d.getParentInfo() == null) continue;
+                String[] parts = d.getParentInfo().split(", pos=", 2);
                 if (parts.length != 2) continue;
                 String parentDir = parts[0];
                 int unpackPos;
@@ -493,11 +511,12 @@ public class RecursiveExtractor {
                 }
                 // 在父文档的 elements 中查找该位置附近的 embed Element
                 StoreWriter.DocInfo parent = findDocByDir(parentDir);
-                if (parent == null || parent.embedElementPositions == null) continue;
+                if (parent == null || parent.getEmbedElementPositions() == null) continue;
                 // 使用父文档缓存的 embed Element 位置映射
-                Integer elementPos = parent.embedElementPositions.get(unpackPos);
+                Map<Integer, Integer> posMap = parent.getEmbedElementPositions();
+                Integer elementPos = posMap.get(unpackPos);
                 if (elementPos != null) {
-                    d.parentInfo = parentDir + ", element_pos=" + elementPos;
+                    d.setParentInfo(parentDir + ", element_pos=" + elementPos);
                 }
             }
         }

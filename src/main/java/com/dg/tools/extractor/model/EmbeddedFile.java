@@ -1,8 +1,11 @@
 package com.dg.tools.extractor.model;
 
 import lombok.AllArgsConstructor;
-import lombok.Data;
+import lombok.EqualsAndHashCode;
+import lombok.Getter;
 import lombok.NoArgsConstructor;
+import lombok.Setter;
+import lombok.ToString;
 
 /**
  * 内嵌文件描述符。
@@ -14,7 +17,10 @@ import lombok.NoArgsConstructor;
  * @see OleExtractor#extract
  * @see EmbeddedFile
  */
-@Data
+@Getter
+@Setter
+@ToString
+@EqualsAndHashCode
 @NoArgsConstructor
 @AllArgsConstructor
 public class EmbeddedFile {
@@ -27,4 +33,14 @@ public class EmbeddedFile {
 
     /** 文件的原始字节内容，由上层 Handler 提取后填入。 */
     private byte[] data;
+
+    /** 返回字节数组的防御性复制。 */
+    public byte[] getData() {
+        return data == null ? null : data.clone();
+    }
+
+    /** 设置字节数组（内部存储传入的引用，不额外复制）。 */
+    public void setData(byte[] data) {
+        this.data = data;
+    }
 }

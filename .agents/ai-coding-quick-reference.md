@@ -71,7 +71,7 @@ mvn clean compile                 # 编译通过
 ## ⚠️ 绝不让 AI 独立完成的事
 
 ```
-❌ 修改 DocumentHandler.java 接口签名
+❌ 修改 AbstractHandler.java 基类契约
 ❌ 设计系统架构
 ❌ Phase 1.5 LLM/视觉模型集成策略
 ❌ 数据库 Schema 设计（未来）
