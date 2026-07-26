@@ -266,11 +266,14 @@ public class RecursiveExtractor {
         // 递归处理内嵌文件（若被 triage 过滤则跳过）
         if (!"filtered".equals(status)) {
             for (EmbeddedFile emb : unpacked.getEmbeddedFiles()) {
-                String childName = StringUtils.sanitizeFileName(emb.getFileName());
+                byte[] childData = emb.getData();
+                String childFileName = emb.getFileName();
+                String childExt = typeDetector.detectExtension(childData, childFileName);
+                String childName = StringUtils.sanitizeFileName(childFileName);
                 String childParent = sanitizedDirName + ", pos=" + emb.getPosition();
                 String childDirName = session.resolveDirName(
-                        fileNameToBaseName(emb.getFileName()));
-                processFile(emb.getData(), childName, session, depth + 1, childParent, childDirName);
+                        fileNameToBaseName(childFileName));
+                processFile(childData, childName, session, depth + 1, childParent, childDirName);
             }
         }
     }

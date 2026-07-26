@@ -177,13 +177,14 @@ public class StoreWriter {
     }
 
     /**
-     * 标题感知分块（新 API）。
+     * 标题感知分块（新 API）—— 基于 token 数而非元素数。
      * <p>分块策略：
      * <ol>
-     *   <li>总元素数 ≤ 300 → 不分块，直接写 index.json 并返回</li>
-     *   <li>有标题 → 按 H1 切分为大节，子节超过 200 元素再按 H2/H3 细切</li>
-     *   <li>无标题 → 回退到固定 {@link #CHUNK_SIZE} 机械分块</li>
+     *   <li>全文档内容 token ≤ MAX_TOKENS_WHOLE_DOC(3000) → 不分块</li>
+     *   <li>有标题 → 按 H1→H2→H3 层级逐级切分，每块 ≤ MAX_TOKENS_PER_CHUNK(2000) token</li>
+     *   <li>无标题 → 按 token 数回退到固定大小分块</li>
      * </ol>
+     * <p>中文 token 估算：中文约 ~1.5 char/token，英文 ~4 char/token，取 ~2.5 char/token 作为折中。</p>
      */
     public void writeHierarchicalChunks(Path docDir, String docDirName, String mdFileName,
                                          ExtractionResult result) throws IOException {
@@ -196,14 +197,17 @@ public class StoreWriter {
 
         List<Element> elements = result.getElements();
 
-        // 小文档不分块（≤300 元素直接一个 index.json 完事）
-        if (totalElements <= 300) {
+        // 用 token 数判断是否不分块（3000 token 阈值，约 ~7500 字符中文或 ~12000 字符英文）
+        int totalTokens = estimateTokens(elements, 0, Math.max(0, totalElements - 1));
+        if (totalTokens <= MAX_TOKENS_WHOLE_DOC) {
             Map<String, Object> index = new LinkedHashMap<>();
             index.put("source", docDirName + "/" + mdFileName);
             index.put("total_elements", totalElements);
             index.put("total_large_tables", totalLargeTables);
             index.put("total_images", totalImages);
             index.put("chunk_size", 0);
+            index.put("chunk_mode", "none");
+            index.put("approximate_tokens", totalTokens);
             index.put("chunks", List.of());
             Files.writeString(chunksDir.resolve("index.json"),
                     JSON.writerWithDefaultPrettyPrinter().writeValueAsString(index),
@@ -211,18 +215,13 @@ public class StoreWriter {
             return;
         }
 
-        // 计算分块边界（标题感知）
+        // 计算分块边界（标题感知 + token 上限）
         List<ChunkBoundary> boundaries = computeHierarchicalChunks(elements);
-        // 若没有发现标题 → 回退到固定分块
         int totalChunks = boundaries.size();
         if (totalChunks == 0) {
-            totalChunks = (totalElements + CHUNK_SIZE - 1) / CHUNK_SIZE;
-            boundaries = new ArrayList<>();
-            for (int i = 0; i < totalChunks; i++) {
-                int start = i * CHUNK_SIZE;
-                int end = Math.min(start + CHUNK_SIZE, totalElements) - 1;
-                boundaries.add(new ChunkBoundary(start, end, 0, ""));
-            }
+            // 无标题 → 按 token 数回退到固定分块
+            boundaries = computeTokenBasedChunks(elements, MAX_TOKENS_PER_CHUNK);
+            totalChunks = boundaries.size();
         }
 
         // 构建 index.json
@@ -232,6 +231,8 @@ public class StoreWriter {
         index.put("total_large_tables", totalLargeTables);
         index.put("total_images", totalImages);
         index.put("chunk_size", 0);
+        index.put("chunk_mode", totalChunks > 0 && boundaries.get(0).headingLevel > 0 ? "heading" : "token");
+        index.put("approximate_tokens", totalTokens);
 
         List<Map<String, Object>> chunkList = new ArrayList<>();
         for (int i = 0; i < boundaries.size(); i++) {
@@ -243,12 +244,11 @@ public class StoreWriter {
             chunk.put("file", chunkFile);
             chunk.put("pos_range", List.of(b.start, b.end));
             chunk.put("element_count", b.end - b.start + 1);
+            chunk.put("approximate_tokens", estimateTokens(elements, b.start, b.end));
             if (b.headingLevel > 0) {
                 chunk.put("heading_level", b.headingLevel);
                 chunk.put("heading_text", b.headingText);
             }
-            // 估算 token 数（供 AI 上下文预算参考）
-            chunk.put("approximate_tokens", estimateTokens(elements, b.start, b.end));
             chunk.put("includes_large_table", hasLargeTable);
             chunkList.add(chunk);
         }
@@ -295,6 +295,15 @@ public class StoreWriter {
             }
         }
     }
+
+    /** 不分块的 token 上限（约相当于 223 个中文元素的文档全文）。 */
+    private static final int MAX_TOKENS_WHOLE_DOC = 3000;
+
+    /** 单块最大 token 数。 */
+    private static final int MAX_TOKENS_PER_CHUNK = 2000;
+
+    /** 单块最小 token 数（避免碎片 chunk）。 */
+    private static final int MIN_TOKENS_PER_CHUNK = 200;
 
     /**
      * 计算标题感知的分块边界。
@@ -362,8 +371,37 @@ public class StoreWriter {
     }
 
     /**
+     * 无标题时按 token 数做固定大小分块。
+     * 每个 chunk 内累计元素直到逼近 MAX_TOKENS_PER_CHUNK。
+     */
+    static List<ChunkBoundary> computeTokenBasedChunks(List<Element> elements, int maxTokens) {
+        List<ChunkBoundary> result = new ArrayList<>();
+        if (elements.isEmpty()) return result;
+        int chunkStart = 0;
+        int currentTokens = 0;
+        for (int i = 0; i < elements.size(); i++) {
+            Element e = elements.get(i);
+            int elemChars = (e.getContent() != null ? e.getContent().length() : 0)
+                    + (e.getMetadata() != null ? e.getMetadata().length() : 0);
+            int elemTokens = Math.max(1, elemChars / 3);  // 折中：~3 chars/token（兼顾中英文）
+            if (currentTokens + elemTokens > maxTokens && i > chunkStart) {
+                result.add(new ChunkBoundary(chunkStart, i - 1, 0, ""));
+                chunkStart = i;
+                currentTokens = elemTokens;
+            } else {
+                currentTokens += elemTokens;
+            }
+        }
+        // 最后一块
+        if (chunkStart < elements.size()) {
+            result.add(new ChunkBoundary(chunkStart, elements.size() - 1, 0, ""));
+        }
+        return result;
+    }
+
+    /**
      * 估算指定范围内元素的 token 数。
-     * 经验公式：每 4 个 ASCII 字符 ≈ 1 token。
+     * 经验公式：中文 ~1.5 char/token，英文 ~4 char/token，取 ~2.5 char/token。
      */
     private int estimateTokens(List<Element> elements, int start, int end) {
         int chars = 0;
@@ -372,7 +410,7 @@ public class StoreWriter {
             if (e.getContent() != null) chars += e.getContent().length();
             if (e.getMetadata() != null) chars += e.getMetadata().length();
         }
-        return Math.max(1, chars / 4);
+        return Math.max(1, (int) (chars / 2.5));
     }
 
     /** 标题感知分块的边界。 */
