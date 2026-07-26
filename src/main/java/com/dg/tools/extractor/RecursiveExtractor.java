@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -98,54 +99,66 @@ public class RecursiveExtractor {
     }
 
     /**
-     * 处理根文档的入口方法。
-     * <p>执行流程：
-     * <ol>
-     *   <li>检查文件大小上限 → 创建 session 目录</li>
-     *   <li>Phase 1：递归 unpack → 写入源文件 + media/ + 嵌入文件列表</li>
-     *   <li>Phase 2：逐条目 parse → 写入 body.md + chunks/ + data/</li>
-     *   <li>写入 manifest.json</li>
-     * </ol>
+     * 批量处理多个根文件。
+     * 所有根文件共享同一个 UUID 输出目录，各自以文件名（去扩展名）创建子目录。
+     * <p>适用场景：
+     * <ul>
+     *   <li>单文件：传入一个 FileEntry 即可</li>
+     *   <li>多文件：FS + UR 文档对同时提取</li>
+     *   <li>目录扫描：Application CLI 扫描目录后批量传入</li>
+     * </ul>
      *
-     * @param rawBytes  根文档的原始字节
-     * @param fileName  根文档的文件名
-     * @param sessionId 提取会话 ID（用于输出目录命名）
-     * @return 输出目录路径
+     * @param rootFiles 根文件列表
+     * @return 输出目录（UUID）路径
      */
-    public Path processRoot(byte[] rawBytes, String fileName, String sessionId) throws IOException {
-        // 根文档大小校验
-        if (rawBytes.length > maxFileSize) {
-            throw new IOException("File too large: " + fileName
-                    + " (" + (rawBytes.length / (1024 * 1024)) + " MB), max is "
-                    + (maxFileSize / (1024 * 1024)) + " MB");
-        }
-
-        // 创建 session 输出目录
+    public Path processRootFiles(List<FileEntry> rootFiles) throws IOException {
+        String sessionId = UUID.randomUUID().toString().substring(0, 8);
         Path sessionDir = outputBase.resolve(sessionId);
         Files.createDirectories(sessionDir);
 
         Session session = new Session(sessionId, sessionDir);
-        String baseName = fileNameToBaseName(fileName);
-        String dirName = session.resolveDirName(baseName);
 
-        // Phase 1: 递归拆包（含 TRIAGE 过滤 + IMAGE 描述）
-        processFile(rawBytes, fileName, session, 0, null, dirName);
+        // Phase 1: 所有根文件递归拆包
+        for (FileEntry f : rootFiles) {
+            if (f.rawBytes.length > maxFileSize) {
+                log.warn("File too large, skipping: {} ({} MB)", f.fileName,
+                        f.rawBytes.length / (1024 * 1024));
+                continue;
+            }
+            String baseName = fileNameToBaseName(f.fileName);
+            String dirName = session.resolveDirName(baseName);
+            processFile(f.rawBytes, f.fileName, session, 0, null, dirName);
+        }
 
-        // Phase 2: 对每个待解析条目做完整内容解析
+        // Phase 2: 逐文件解析
         for (DocEntry entry : session.pendingEntries) {
             parseEntry(entry, session);
         }
 
-        // Phase 2 后修正：将 parent 引用中的 unpack position 替换为 Element.position
+        // 修正 parent 引用
         session.fixupParentPositions();
 
-        // 写 manifest.json（汇总所有 DocInfo）
-        String manifestJson = StoreWriter.buildManifestJson(sessionId, fileName, session.docInfoList);
+        // 写 manifest.json
+        String rootDesc = rootFiles.size() == 1 ? rootFiles.get(0).fileName
+                : rootFiles.size() + " files";
+        String manifestJson = StoreWriter.buildManifestJson(sessionId, rootDesc, session.docInfoList);
         Files.writeString(sessionDir.resolve("manifest.json"), manifestJson);
 
-        log.info("Extraction complete — output: {}", sessionDir.toAbsolutePath());
+        log.info("Extraction complete — {} root files → output: {}", rootFiles.size(),
+                sessionDir.toAbsolutePath());
         return sessionDir;
     }
+
+    /**
+     * 单个文件提取（向后兼容）。
+     * 内部转为 processRootFiles 调用。
+     */
+    public Path processRoot(byte[] rawBytes, String fileName, String sessionId) throws IOException {
+        return processRootFiles(List.of(new FileEntry(rawBytes, fileName)));
+    }
+
+    /** 根文件条目。 */
+    public record FileEntry(byte[] rawBytes, String fileName) {}
 
     /**
      * Phase 1 UNPACK + Phase 1.5 TRIAGE+IMAGE：递归处理一个文件（含其嵌入子文件）。
