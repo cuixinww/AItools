@@ -118,6 +118,13 @@ public class RecursiveExtractor {
             return;
         }
 
+        // 单个文件大小上限检查（防止嵌入文件过大导致 OOM）
+        if (rawBytes.length > maxFileSize) {
+            log.warn("Embedded file too large: {} ({} MB), skipping",
+                    fileName, rawBytes.length / (1024 * 1024));
+            return;
+        }
+
         // 使用 TypeDetector 识别真实类型（比扩展名更可靠）
         String detectedExt = typeDetector.detectExtension(rawBytes, fileName);
         String sanitizedDirName = StringUtils.sanitizeFileName(dirName);
@@ -213,6 +220,7 @@ public class RecursiveExtractor {
 
     /**
      * Phase 2 PARSE：对单个已拆包的文档做完整内容解析并写入产物。
+     * 解析完成后立即释放 rawBytes 引用，允许 GC 回收。
      */
     private void parseEntry(DocEntry entry, Session session) {
         Path docDir = session.sessionDir.resolve(StringUtils.sanitizeFileName(entry.dirName));
@@ -245,6 +253,9 @@ public class RecursiveExtractor {
         } catch (Exception e) {
             log.error("Phase 2 parse failed for: {}", entry.fileName, e);
             session.updateDocInfoStatus(entry.seq, "error");
+        } finally {
+            // 释放 rawBytes 引用，允许 GC 回收
+            entry.release();
         }
     }
 
@@ -340,9 +351,9 @@ public class RecursiveExtractor {
         }
     }
 
-    /** Phase 2 待解析条目。 */
+    /** Phase 2 待解析条目。rawBytes 在 Phase 2 完成后通过 release() 释放。 */
     static class DocEntry {
-        final byte[] rawBytes;
+        byte[] rawBytes;
         final String fileName;
         final String dirName;
         final String fileType;
@@ -357,6 +368,11 @@ public class RecursiveExtractor {
             this.fileType = fileType;
             this.parentInfo = parentInfo;
             this.seq = seq;
+        }
+
+        /** 释放 rawBytes 引用，允许 GC 回收该文件的字节数据。 */
+        void release() {
+            this.rawBytes = null;
         }
     }
 }

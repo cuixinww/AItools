@@ -7,6 +7,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.util.Set;
 
@@ -49,28 +50,26 @@ public class ImageHandler extends AbstractHandler {
 
     @Override
     protected ExtractionResult doUnpack(InputStream is, String fileName) throws Exception {
-        ExtractionResult unpacked = ExtractionResult.of("image", fileName);
-        try {
-            byte[] data = is.readAllBytes();
-            if (data.length > maxImageBytes) {
-                log.warn("Image too large: {} ({} MB)", fileName, data.length / (1024 * 1024));
-                unpacked.addError("image too large: " + fileName);
-                return unpacked;
-            }
-            unpacked.addImage(new ImageFile(fileName, 0, data, normalizeFormat(fileName)));
-        } catch (Exception e) {
-            log.error("Failed to unpack image: {}", fileName, e);
-            unpacked.addError("unpack error: " + e.getMessage());
-        }
-        return unpacked;
+        return readImage(is, fileName, "unpack");
     }
 
     @Override
     protected ExtractionResult doExtract(InputStream is, String fileName) throws Exception {
-        ExtractionResult result = ExtractionResult.of("image", fileName);
+        return readImage(is, fileName, "parse");
+    }
 
+    /**
+     * 流式读取图片字节，边读边累积并检查大小上限。
+     * 避免超大图片先全部读入堆再被拒绝的 OOM 风险。
+     */
+    private ExtractionResult readImage(InputStream is, String fileName, String phase) {
+        ExtractionResult result = ExtractionResult.of("image", fileName);
         try {
-            byte[] data = is.readAllBytes();
+            byte[] data = readWithSizeLimit(is, fileName);
+            if (data == null) {
+                result.addError("image too large: " + fileName);
+                return result;
+            }
             if (data.length > maxImageBytes) {
                 log.warn("Image too large: {} ({} MB)", fileName, data.length / (1024 * 1024));
                 result.addError("image too large: " + fileName);
@@ -78,11 +77,33 @@ public class ImageHandler extends AbstractHandler {
             }
             result.addImage(new ImageFile(fileName, 0, data, normalizeFormat(fileName)));
         } catch (Exception e) {
-            log.error("Failed to read image: {}", fileName, e);
-            result.addError("parse error: " + e.getMessage());
+            log.error("Failed to {} image: {}", phase, fileName, e);
+            result.addError(phase + " error: " + e.getMessage());
         }
-
         return result;
+    }
+
+    /**
+     * 流式读取，每 8KB 检查一次累计大小。
+     * 超过 {@link #maxImageBytes} 上限时返回 null 并记录警告。
+     *
+     * @return 完整的字节数组，或 null（超限时）
+     */
+    private byte[] readWithSizeLimit(InputStream is, String fileName) throws Exception {
+        byte[] buf = new byte[8192];
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        int total = 0;
+        int n;
+        while ((n = is.read(buf)) != -1) {
+            total += n;
+            if (total > maxImageBytes) {
+                log.warn("Image size limit exceeded during streaming read: {} (>{}) MB), discarding",
+                        fileName, maxImageBytes / (1024 * 1024));
+                return null;
+            }
+            baos.write(buf, 0, n);
+        }
+        return baos.toByteArray();
     }
 
     private static String normalizeFormat(String fileName) {

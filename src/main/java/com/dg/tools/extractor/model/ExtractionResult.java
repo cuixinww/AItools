@@ -34,11 +34,11 @@ public class ExtractionResult {
                 new ArrayList<>(), new ArrayList<>());
     }
 
-    public void addElement(Element e) { elements.add(e); }
-    public void addEmbedded(EmbeddedFile e) { embeddedFiles.add(e); }
-    public void addImage(ImageFile img) { images.add(img); }
-    public void addLargeTable(LargeTableInfo t) { largeTables.add(t); }
-    public void addError(String err) { errors.add(err); }
+    public void addElement(Element e) { if (elements == null) elements = new ArrayList<>(); elements.add(e); }
+    public void addEmbedded(EmbeddedFile e) { if (embeddedFiles == null) embeddedFiles = new ArrayList<>(); embeddedFiles.add(e); }
+    public void addImage(ImageFile img) { if (images == null) images = new ArrayList<>(); images.add(img); }
+    public void addLargeTable(LargeTableInfo t) { if (largeTables == null) largeTables = new ArrayList<>(); largeTables.add(t); }
+    public void addError(String err) { if (errors == null) errors = new ArrayList<>(); errors.add(err); }
 
     public void setElements(List<Element> elements) { this.elements.clear(); if (elements != null) this.elements.addAll(elements); }
     public void setEmbeddedFiles(List<EmbeddedFile> embeddedFiles) { this.embeddedFiles.clear(); if (embeddedFiles != null) this.embeddedFiles.addAll(embeddedFiles); }
