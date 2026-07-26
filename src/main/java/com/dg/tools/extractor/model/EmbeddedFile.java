@@ -5,21 +5,26 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 /**
- * 内嵌文件（EmbeddedFile）。
+ * 内嵌文件描述符。
  *
- * 表示从文档中拆出的一个附件 / 内嵌对象（如嵌入的 Excel、PDF、OLE 解出的内部文件等）。
- * 携带原始字节，供阶段 1 递归拆包或阶段 2 解析使用。
+ * 从文档中拆出的附件或 OLE 解出的内部文件，携带原始字节用于递归拆包或再次解析。
+ * OLE 场景下 fileName 可能包含路径前缀（如 "WordDocument/inner.xlsx"），
+ * 用于区分来自不同内嵌对象的同名文件，避免目录冲突。
  *
- * 字段说明：
- *   - fileName：内嵌文件名（OLE 场景可能带路径前缀以消歧）；
- *   - position：在父文档中出现的位置序号（用于父上下文回溯）；
- *   - data    ：文件原始字节内容。
+ * @see OleExtractor#extract
+ * @see EmbeddedFile
  */
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
 public class EmbeddedFile {
+
+    /** 内嵌文件名。普通附件为纯文件名；OLE 解出时可能带路径前缀（用于消歧）。 */
     private String fileName;
+
+    /** 该文件在父文档中的出现位置序号，用于定位和溯源。 */
     private int position;
+
+    /** 文件的原始字节内容，由上层 Handler 提取后填入。 */
     private byte[] data;
 }
