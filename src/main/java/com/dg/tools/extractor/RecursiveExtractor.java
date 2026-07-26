@@ -3,9 +3,7 @@ package com.dg.tools.extractor;
 import com.dg.tools.extractor.handler.AbstractHandler;
 import com.dg.tools.extractor.image.ImageDescriber;
 import com.dg.tools.extractor.image.ImageDescription;
-import com.dg.tools.extractor.image.NoOpImageDescriber;
 import com.dg.tools.extractor.model.*;
-import com.dg.tools.extractor.triage.NoOpTriageProcessor;
 import com.dg.tools.extractor.triage.RelevanceAssessment;
 import com.dg.tools.extractor.triage.TriageProcessor;
 import com.dg.tools.extractor.util.StringUtils;
@@ -55,18 +53,19 @@ public class RecursiveExtractor {
             List<AbstractHandler> handlers,
             StoreWriter storeWriter,
             TypeDetector typeDetector,
+            TriageProcessor triageProcessor,
+            ImageDescriber imageDescriber,
             @Value("${extractor.pipeline.max-depth:10}") int maxDepth,
             @Value("${extractor.pipeline.max-file-size:209715200}") long maxFileSize,
             @Value("${extractor.output.base:extracted}") String outputBase) {
         this.handlers = handlers;
         this.storeWriter = storeWriter;
         this.typeDetector = typeDetector;
+        this.triageProcessor = triageProcessor;
+        this.imageDescriber = imageDescriber;
         this.maxDepth = maxDepth;
         this.maxFileSize = maxFileSize;
         this.outputBase = Paths.get(outputBase);
-        // Phase 1.5 默认使用空操作实现；接入 LLM 后通过 Spring Bean 注入覆盖
-        this.triageProcessor = new NoOpTriageProcessor();
-        this.imageDescriber = new NoOpImageDescriber();
     }
 
     /**

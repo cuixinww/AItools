@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C e:/silf/dg_tools log --oneline -4)",
+      "Bash(git -C e:/silf/dg_tools status --short)"
+    ]
+  }
+}
