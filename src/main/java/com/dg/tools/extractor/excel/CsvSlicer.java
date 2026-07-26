@@ -49,61 +49,67 @@ public class CsvSlicer {
      * @param dataDir   完整 CSV 所在目录（data/）
      * @param sheetName 工作表名（用于切片目录命名）
      * @param allRows   全部数据行（已从表头行开始）
-     * @param columns   列名列表（用于 index.json）
+     * @param columns   列名列表（用于 index.json），可为 null（跳过切片）
+     * @throws IOException 切片过程中出现 I/O 错误时抛出
      */
     public static void sliceIfNeeded(Path dataDir, String sheetName,
-                                       List<List<String>> allRows, List<String> columns) {
+                                       List<List<String>> allRows, List<String> columns) throws IOException {
         if (allRows.size() <= SLICE_THRESHOLD) return;
+        if (columns == null) {
+            log.warn("CsvSlicer: columns is null for sheet '{}', skipping slice", sheetName);
+            return;
+        }
 
         Path sliceDir = dataDir.resolve(StringUtils.sanitizeFileName(sheetName));
-        try {
-            if (Files.exists(sliceDir)) {
-                try (Stream<Path> files = Files.list(sliceDir)) {
-                    files.sorted(Comparator.reverseOrder()).forEach(p -> {
-                        try { Files.deleteIfExists(p); } catch (IOException e) {
-                            log.warn("Failed to delete old slice: {}", p, e);
-                        }
-                    });
+        if (Files.exists(sliceDir)) {
+            // 先收集文件列表，关闭 Stream 后再逐个删除，避免 Windows 目录句柄冲突
+            List<Path> toDelete;
+            try (Stream<Path> files = Files.list(sliceDir)) {
+                toDelete = files.sorted(Comparator.reverseOrder()).toList();
+            }
+            for (Path p : toDelete) {
+                try {
+                    Files.deleteIfExists(p);
+                } catch (IOException e) {
+                    log.warn("Failed to delete old slice: {}", p, e);
                 }
             }
-            Files.createDirectories(sliceDir);
+        }
+        Files.createDirectories(sliceDir);
 
-            int totalChunks = (allRows.size() + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        int totalChunks = (allRows.size() + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
-            Map<String, Object> index = new LinkedHashMap<>();
-            index.put("version", "1.0");
-            index.put("name", StringUtils.sanitizeFileName(sheetName) + ".csv");
-            index.put("total_rows", allRows.size());
-            index.put("chunk_size", CHUNK_SIZE);
-            index.put("columns", columns);
-            List<Map<String, Object>> chunks = new ArrayList<>();
-            for (int i = 0; i < totalChunks; i++) {
-                int startRow = i * CHUNK_SIZE + 1;
-                int endRow = Math.min(startRow + CHUNK_SIZE - 1, allRows.size());
-                Map<String, Object> chunk = new LinkedHashMap<>();
-                chunk.put("file", String.format("chunk_%04d.csv", i + 1));
-                chunk.put("row_range", List.of(startRow, endRow));
-                chunks.add(chunk);
-            }
-            index.put("chunks", chunks);
-            Files.writeString(sliceDir.resolve("index.json"),
-                    JSON.writerWithDefaultPrettyPrinter().writeValueAsString(index),
-                    StandardCharsets.UTF_8);
+        Map<String, Object> index = new LinkedHashMap<>();
+        index.put("version", "1.0");
+        index.put("name", StringUtils.sanitizeFileName(sheetName) + ".csv");
+        index.put("total_rows", allRows.size());
+        index.put("chunk_size", CHUNK_SIZE);
+        index.put("columns", columns);
+        List<Map<String, Object>> chunks = new ArrayList<>();
+        for (int i = 0; i < totalChunks; i++) {
+            int startRow = i * CHUNK_SIZE + 1;
+            int endRow = Math.min(startRow + CHUNK_SIZE - 1, allRows.size());
+            Map<String, Object> chunk = new LinkedHashMap<>();
+            chunk.put("file", String.format("chunk_%04d.csv", i + 1));
+            chunk.put("row_range", List.of(startRow, endRow));
+            chunks.add(chunk);
+        }
+        index.put("chunks", chunks);
+        Files.writeString(sliceDir.resolve("index.json"),
+                JSON.writerWithDefaultPrettyPrinter().writeValueAsString(index),
+                StandardCharsets.UTF_8);
 
-            for (int i = 0; i < totalChunks; i++) {
-                int start = i * CHUNK_SIZE;
-                int end = Math.min(start + CHUNK_SIZE, allRows.size());
-                Path chunkFile = sliceDir.resolve(String.format("chunk_%04d.csv", i + 1));
+        for (int i = 0; i < totalChunks; i++) {
+            int start = i * CHUNK_SIZE;
+            int end = Math.min(start + CHUNK_SIZE, allRows.size());
+            Path chunkFile = sliceDir.resolve(String.format("chunk_%04d.csv", i + 1));
 
-                try (BufferedWriter bw = Files.newBufferedWriter(chunkFile, StandardCharsets.UTF_8)) {
-                    for (int r = start; r < end; r++) {
-                        bw.write(StringUtils.toCsvLine(allRows.get(r)));
-                        bw.newLine();
-                    }
+            try (BufferedWriter bw = Files.newBufferedWriter(chunkFile, StandardCharsets.UTF_8)) {
+                for (int r = start; r < end; r++) {
+                    bw.write(StringUtils.toCsvLine(allRows.get(r)));
+                    bw.newLine();
                 }
             }
-        } catch (Exception e) {
-            log.error("Failed to slice CSV for sheet: {}", sheetName, e);
         }
     }
 

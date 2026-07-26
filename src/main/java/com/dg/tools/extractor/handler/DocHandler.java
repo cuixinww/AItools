@@ -179,10 +179,11 @@ public class DocHandler extends AbstractHandler {
             if (run == null) continue;
             String runText = run.text();
             if (runText == null || runText.isEmpty()) continue;
+            String trimmed = runText.trim();
             if (run.isStrikeThrough()) {
-                sb.append("~~").append(runText.trim()).append("~~");
+                sb.append("~~").append(trimmed).append("~~");
             } else {
-                sb.append(runText);
+                sb.append(trimmed);
             }
         }
         return sb.toString().trim();

@@ -3,6 +3,7 @@ package com.dg.tools.extractor.excel;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -15,7 +16,7 @@ class CsvSlicerTest {
     Path tempDir;
 
     @Test
-    void sliceNotNeededBelowThreshold() {
+    void sliceNotNeededBelowThreshold() throws IOException {
         List<List<String>> rows = List.of(
                 List.of("a", "b"),
                 List.of("c", "d")
@@ -25,21 +26,21 @@ class CsvSlicerTest {
     }
 
     @Test
-    void sliceExactlyAtThreshold() {
+    void sliceExactlyAtThreshold() throws IOException {
         List<List<String>> rows = createRows(500);
         CsvSlicer.sliceIfNeeded(tempDir, "exact", rows, List.of("col1"));
         assertThat(tempDir.resolve("exact")).doesNotExist();
     }
 
     @Test
-    void sliceAboveThreshold() {
+    void sliceAboveThreshold() throws IOException {
         List<List<String>> rows = createRows(550);
         CsvSlicer.sliceIfNeeded(tempDir, "large", rows, List.of("col1"));
         assertThat(tempDir.resolve("large")).isDirectory();
     }
 
     @Test
-    void sliceIndexJsonContent() throws Exception {
+    void sliceIndexJsonContent() throws IOException {
         List<List<String>> rows = createRows(550);
         CsvSlicer.sliceIfNeeded(tempDir, "verify", rows, List.of("col1"));
 
@@ -52,7 +53,7 @@ class CsvSlicerTest {
     }
 
     @Test
-    void sliceChunkFilesExist() throws Exception {
+    void sliceChunkFilesExist() throws IOException {
         List<List<String>> rows = createRows(550);
         CsvSlicer.sliceIfNeeded(tempDir, "chunks", rows, List.of("col1"));
 
@@ -63,7 +64,7 @@ class CsvSlicerTest {
     }
 
     @Test
-    void sliceCleansUpOldFiles() throws Exception {
+    void sliceCleansUpOldFiles() throws IOException {
         Path sliceDir = tempDir.resolve("clean");
         Files.createDirectories(sliceDir);
         Path oldFile = sliceDir.resolve("old.csv");
@@ -76,7 +77,7 @@ class CsvSlicerTest {
     }
 
     @Test
-    void sliceWithSpecialCharsInSheetName() throws Exception {
+    void sliceWithSpecialCharsInSheetName() throws IOException {
         List<List<String>> rows = createRows(550);
         CsvSlicer.sliceIfNeeded(tempDir, "my sheet:test", rows, List.of("col1"));
 
@@ -84,7 +85,7 @@ class CsvSlicerTest {
     }
 
     @Test
-    void sliceExactMultipleOfChunkSize() throws Exception {
+    void sliceExactMultipleOfChunkSize() throws IOException {
         List<List<String>> rows = createRows(600);
         CsvSlicer.sliceIfNeeded(tempDir, "exact6", rows, List.of("col1"));
 
